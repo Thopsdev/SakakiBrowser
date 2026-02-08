@@ -307,6 +307,26 @@ const commands = {
     }
   },
 
+  async 'type-secret'(selector, secretName) {
+    if (!selector || !secretName) {
+      error('Usage: sakaki type-secret <selector> <secretName>');
+      console.log('  Types a secret from vault without exposing its value');
+      return;
+    }
+
+    try {
+      const { data } = await request('POST', '/type-secret', { selector, secretName });
+      if (data.success) {
+        success(`Typed secret "${secretName}" into: ${selector}`);
+        console.log(`  ${colors.dim}(value never exposed)${colors.reset}`);
+      } else {
+        error(data.error || 'Type secret failed');
+      }
+    } catch (e) {
+      error(e.message);
+    }
+  },
+
   async screenshot(outputPath) {
     const output = outputPath || `screenshot-${Date.now()}.png`;
 
@@ -367,6 +387,7 @@ ${colors.yellow}Browser:${colors.reset}
   sakaki navigate <url>     Navigate to URL
   sakaki click <selector>   Click element (CSS or semantic)
   sakaki type <sel> <text>  Type text into element
+  sakaki type-secret <sel> <name>  Type secret from vault (safe)
   sakaki screenshot [path]  Take screenshot
 
 ${colors.yellow}Other:${colors.reset}

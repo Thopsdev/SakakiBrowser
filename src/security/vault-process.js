@@ -370,6 +370,42 @@ const handlers = {
     };
   },
 
+  // Get secret value for internal use only (browser form filling)
+  // This is NOT exposed via API - only callable internally
+  getForInternal(params) {
+    if (isDestroyed) return { success: false, error: 'Vault destroyed' };
+    if (!masterKey) return { success: false, error: 'Not initialized' };
+    if (!params.name) return { success: false, error: 'name required' };
+
+    const secret = secrets.get(params.name);
+    if (!secret) {
+      audit('GET_INTERNAL', params.name, false, { reason: 'not_found' });
+      return { success: false, error: 'Secret not found' };
+    }
+
+    try {
+      // Decrypt
+      const key = deriveKey(masterKey, Buffer.from(secret.salt, 'hex'));
+      const decipher = crypto.createDecipheriv(
+        'aes-256-gcm',
+        key,
+        Buffer.from(secret.iv, 'hex')
+      );
+      decipher.setAuthTag(Buffer.from(secret.authTag, 'hex'));
+
+      let decrypted = decipher.update(secret.encrypted, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+
+      audit('GET_INTERNAL', params.name, true, { caller: 'browser-form' });
+
+      // Return value (only for internal browser operations)
+      return { success: true, value: decrypted };
+    } catch (e) {
+      audit('GET_INTERNAL', params.name, false, { error: e.message });
+      return { success: false, error: 'Decryption failed' };
+    }
+  },
+
   // ========== Proxy Features ==========
 
   // Proxy configuration

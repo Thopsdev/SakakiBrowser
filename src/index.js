@@ -96,6 +96,10 @@ async function fullSecurityCheck(url, page = null) {
 }
 
 // Page operation API (with full security check)
+// Current page state for sequential operations
+let currentPage = null;
+let currentMonitor = null;
+
 app.post('/navigate', async (req, res) => {
   const { url, skipSecurityCheck } = req.body;
 
@@ -118,22 +122,33 @@ app.post('/navigate', async (req, res) => {
   }
 
   try {
+    // Close previous page if exists
+    if (currentPage) {
+      try {
+        await currentPage.close();
+        rateLimiter.pageClosed();
+        if (currentMonitor) currentMonitor.stop();
+      } catch {}
+    }
+
     rateLimiter.recordRequest(url);
     rateLimiter.pageOpened();
 
-    const page = await browser.newPage();
+    currentPage = await browser.newPage();
 
     // Start resource monitoring
-    const monitor = await resourceMonitor.monitorPage(page);
+    currentMonitor = await resourceMonitor.monitorPage(currentPage);
 
-    await page.goto(url, { waitUntil: 'networkidle2' });
+    await currentPage.goto(url, { waitUntil: 'networkidle2' });
 
     // Phishing check after page load
-    const phishingCheck = await phishing.checkPhishing(url, page);
+    const phishingCheck = await phishing.checkPhishing(url, currentPage);
     if (phishingCheck.isPhishing) {
-      await page.close();
+      await currentPage.close();
+      currentPage = null;
       rateLimiter.pageClosed();
-      monitor.stop();
+      currentMonitor.stop();
+      currentMonitor = null;
       return res.json({
         blocked: true,
         reason: 'Phishing detected after page load',
@@ -142,18 +157,18 @@ app.post('/navigate', async (req, res) => {
       });
     }
 
-    const title = await page.title();
-    const metrics = monitor.getMetrics();
+    const title = await currentPage.title();
+    const metrics = currentMonitor.getMetrics();
 
-    await page.close();
-    rateLimiter.pageClosed();
-    monitor.stop();
+    // Keep page open for subsequent operations
 
     // Aggregate all warnings
     const allWarnings = [
       ...(securityCheck?.warnings || []),
       ...phishingCheck.warnings.map(w => w.message || w)
     ].filter(Boolean);
+
+    guardian.logAction('navigate', { url }, securityCheck?.risk || 'safe', false);
 
     res.json({
       success: true,
@@ -165,6 +180,10 @@ app.post('/navigate', async (req, res) => {
       warnings: allWarnings.length > 0 ? allWarnings : undefined
     });
   } catch (err) {
+    if (currentPage) {
+      try { await currentPage.close(); } catch {}
+      currentPage = null;
+    }
     rateLimiter.pageClosed();
     res.json({
       error: err.message,
@@ -174,28 +193,191 @@ app.post('/navigate', async (req, res) => {
   }
 });
 
+// Close current page
+app.post('/close', async (req, res) => {
+  if (currentPage) {
+    try {
+      await currentPage.close();
+      currentPage = null;
+      rateLimiter.pageClosed();
+      if (currentMonitor) {
+        currentMonitor.stop();
+        currentMonitor = null;
+      }
+      res.json({ success: true });
+    } catch (err) {
+      res.json({ error: err.message });
+    }
+  } else {
+    res.json({ success: true, message: 'No page open' });
+  }
+});
+
 // Screenshot
 app.post('/screenshot', async (req, res) => {
-  const { url } = req.body;
+  const { url, path: outputPath } = req.body;
 
-  const check = await fullSecurityCheck(url);
-  if (!check.allowed) {
-    return res.json({ blocked: true, warnings: check.warnings });
+  // If URL provided, navigate first; otherwise use current page
+  if (url) {
+    const check = await fullSecurityCheck(url);
+    if (!check.allowed) {
+      return res.json({ blocked: true, warnings: check.warnings });
+    }
+
+    try {
+      rateLimiter.recordRequest(url);
+      rateLimiter.pageOpened();
+
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: 'networkidle2' });
+      const screenshot = await page.screenshot({ encoding: 'base64', path: outputPath });
+      await page.close();
+      rateLimiter.pageClosed();
+
+      res.json({ success: true, screenshot: outputPath ? undefined : screenshot, path: outputPath });
+      return;
+    } catch (err) {
+      rateLimiter.pageClosed();
+      res.json({ error: err.message });
+      return;
+    }
+  }
+
+  // Use current page
+  if (!currentPage) {
+    return res.json({ error: 'No page open. Call /navigate first or provide a URL' });
   }
 
   try {
-    rateLimiter.recordRequest(url);
-    rateLimiter.pageOpened();
-
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
-    const screenshot = await page.screenshot({ encoding: 'base64' });
-    await page.close();
-    rateLimiter.pageClosed();
-
-    res.json({ success: true, screenshot, warnings: check.warnings });
+    if (outputPath) {
+      // Save to file
+      await currentPage.screenshot({ path: outputPath });
+      guardian.logAction('screenshot', { path: outputPath }, 'safe', false);
+      res.json({ success: true, path: outputPath });
+    } else {
+      // Return base64
+      const screenshot = await currentPage.screenshot({ encoding: 'base64' });
+      guardian.logAction('screenshot', {}, 'safe', false);
+      res.json({ success: true, screenshot });
+    }
   } catch (err) {
-    rateLimiter.pageClosed();
+    res.json({ error: err.message });
+  }
+});
+
+// Click element
+app.post('/click', async (req, res) => {
+  const { selector } = req.body;
+  if (!selector) {
+    return res.json({ error: 'selector required' });
+  }
+
+  if (!currentPage) {
+    return res.json({ error: 'No page open. Call /navigate first' });
+  }
+
+  try {
+    // Try semantic search first, fall back to CSS selector
+    let clicked = false;
+    try {
+      const found = await semanticFinder.find(currentPage, selector);
+      if (found && found.element) {
+        await found.element.click();
+        clicked = true;
+      }
+    } catch {
+      // Fall back to CSS selector
+    }
+
+    if (!clicked) {
+      await currentPage.click(selector);
+    }
+
+    guardian.logAction('click', { selector }, 'safe', false);
+    res.json({ success: true, selector });
+  } catch (err) {
+    guardian.logAction('click', { selector }, 'error', false);
+    res.json({ error: err.message });
+  }
+});
+
+// Type text into element
+app.post('/type', async (req, res) => {
+  const { selector, text } = req.body;
+  if (!selector || text === undefined) {
+    return res.json({ error: 'selector and text required' });
+  }
+
+  if (!currentPage) {
+    return res.json({ error: 'No page open. Call /navigate first' });
+  }
+
+  try {
+    // Try semantic search first
+    let typed = false;
+    try {
+      const found = await semanticFinder.find(currentPage, selector);
+      if (found && found.element) {
+        await found.element.type(text);
+        typed = true;
+      }
+    } catch {
+      // Fall back to CSS selector
+    }
+
+    if (!typed) {
+      await currentPage.type(selector, text);
+    }
+
+    guardian.logAction('type', { selector, length: text.length }, 'safe', false);
+    res.json({ success: true, selector });
+  } catch (err) {
+    guardian.logAction('type', { selector }, 'error', false);
+    res.json({ error: err.message });
+  }
+});
+
+// Type secret from vault (value never exposed to caller)
+app.post('/type-secret', async (req, res) => {
+  const { selector, secretName } = req.body;
+  if (!selector || !secretName) {
+    return res.json({ error: 'selector and secretName required' });
+  }
+
+  if (!currentPage) {
+    return res.json({ error: 'No page open. Call /navigate first' });
+  }
+
+  try {
+    // Get secret value from vault process (internal only)
+    const secretResult = await vaultClient.send('getForInternal', { name: secretName });
+    if (!secretResult.success) {
+      return res.json({ error: secretResult.error || 'Secret not found or vault not initialized' });
+    }
+
+    // Type the secret
+    let typed = false;
+    try {
+      const found = await semanticFinder.find(currentPage, selector);
+      if (found && found.element) {
+        await found.element.type(secretResult.value);
+        typed = true;
+      }
+    } catch {
+      // Fall back to CSS selector
+    }
+
+    if (!typed) {
+      await currentPage.type(selector, secretResult.value);
+    }
+
+    // Clear secret from memory
+    secretResult.value = null;
+
+    guardian.logAction('type-secret', { selector, secretName }, 'safe', false);
+    res.json({ success: true, selector, secretName });
+  } catch (err) {
+    guardian.logAction('type-secret', { selector, secretName }, 'error', false);
     res.json({ error: err.message });
   }
 });
