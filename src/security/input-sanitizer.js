@@ -40,6 +40,9 @@ const INJECTION_PATTERNS = [
 
 // Strict URL validation
 function isStrictlyValidUrl(input) {
+  if (!input || typeof input !== 'string') {
+    return { valid: false, reason: 'Input is empty or not a string' };
+  }
   // Immediately reject those containing spaces or plus signs
   if (/[\s+]/.test(input.replace(/\+/g, ' ').trim())) {
     // + within URL should be encoded
@@ -83,6 +86,14 @@ function isStrictlyValidUrl(input) {
 
 // Input sanitization
 function sanitizeInput(input, context = 'url') {
+  if (!input || typeof input !== 'string') {
+    return {
+      original: input,
+      sanitized: '',
+      warnings: [],
+      blocked: false
+    };
+  }
   const result = {
     original: input,
     sanitized: input,
