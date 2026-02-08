@@ -1,0 +1,27 @@
+{
+  "name": "sakaki-browser",
+  "version": "0.1.0",
+  "description": "Secure browser automation framework for AI agents with ZKP Vault",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "browser-automation",
+    "security",
+    "ai-agent",
+    "vault",
+    "puppeteer"
+  ],
+  "author": "Thops",
+  "license": "MIT",
+  "dependencies": {
+    "@napi-rs/blake-hash": "^1.3.6",
+    "@noble/hashes": "^2.0.1",
+    "express": "^4.18.2",
+    "puppeteer": "^23.0.0",
+    "sharp": "^0.34.5",
+    "ws": "^8.19.0"
+  }
+}
