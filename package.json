@@ -1,8 +1,11 @@
 {
   "name": "sakaki-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Secure browser automation framework for AI agents with ZKP Vault",
   "main": "src/index.js",
+  "bin": {
+    "sakaki": "./bin/sakaki.js"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
