@@ -366,6 +366,101 @@ const commands = {
     }
   },
 
+  // Secrets commands
+  async 'secrets config'() {
+    try {
+      const { data } = await request('GET', '/secrets/config');
+      console.log(`\n${colors.cyan}Secret Detection Config:${colors.reset}`);
+      console.log(`  Enabled: ${data.enabled ? colors.green + 'Yes' : colors.red + 'No'}${colors.reset}`);
+      console.log(`  Built-in patterns: ${data.builtinPatterns?.length || 0}`);
+      console.log(`  Custom patterns: ${data.customPatterns?.length || 0}`);
+      console.log(`  Sensitive fields: ${data.sensitiveFields?.length || 0}`);
+      if (data.customPatterns?.length > 0) {
+        console.log(`\n  Custom patterns:`);
+        data.customPatterns.forEach(p => console.log(`    • ${p.name} (${p.severity})`));
+      }
+      console.log();
+    } catch (e) {
+      error(e.message);
+    }
+  },
+
+  async 'secrets add-pattern'(name, pattern, severity = 'high') {
+    if (!name || !pattern) {
+      error('Usage: sakaki secrets add-pattern <name> <pattern> [severity]');
+      console.log('  Example: sakaki secrets add-pattern "Custom Token" "CUST_[A-Z0-9]{20}"');
+      return;
+    }
+    try {
+      const { data } = await request('POST', '/secrets/pattern', { name, pattern, severity });
+      if (data.success) {
+        success(`Pattern "${name}" added`);
+      } else {
+        error(data.error || 'Failed to add pattern');
+      }
+    } catch (e) {
+      error(e.message);
+    }
+  },
+
+  async 'secrets add-field'(field) {
+    if (!field) {
+      error('Usage: sakaki secrets add-field <fieldName>');
+      return;
+    }
+    try {
+      const { data } = await request('POST', '/secrets/field', { field });
+      if (data.success) {
+        success(`Field "${field}" added to sensitive list`);
+      } else {
+        error(data.error || 'Failed to add field');
+      }
+    } catch (e) {
+      error(e.message);
+    }
+  },
+
+  async 'secrets stats'() {
+    try {
+      const { data } = await request('GET', '/secrets/stats');
+      console.log(`\n${colors.cyan}Secret Detection Stats:${colors.reset}`);
+      console.log(`  Scanned: ${data.scanned}`);
+      console.log(`  Detected: ${data.detected}`);
+      console.log(`  Protected: ${data.protected}`);
+      if (Object.keys(data.byType || {}).length > 0) {
+        console.log(`\n  By Type:`);
+        for (const [type, count] of Object.entries(data.byType)) {
+          console.log(`    • ${type}: ${count}`);
+        }
+      }
+      console.log();
+    } catch (e) {
+      error(e.message);
+    }
+  },
+
+  async 'secrets test'(testData) {
+    if (!testData) {
+      error('Usage: sakaki secrets test <string>');
+      console.log('  Tests if the string contains detectable secrets');
+      return;
+    }
+    try {
+      const { data } = await request('POST', '/secrets/test', { data: testData });
+      if (data.clean) {
+        success('No secrets detected');
+      } else {
+        console.log(`\n${colors.yellow}Secrets detected:${colors.reset}`);
+        for (const finding of data.findings) {
+          console.log(`  ${colors.red}•${colors.reset} ${finding.type} (${finding.severity})`);
+        }
+        console.log();
+      }
+    } catch (e) {
+      error(e.message);
+    }
+  },
+
   // Help
   help() {
     console.log(`
@@ -389,6 +484,13 @@ ${colors.yellow}Browser:${colors.reset}
   sakaki type <sel> <text>  Type text into element
   sakaki type-secret <sel> <name>  Type secret from vault (safe)
   sakaki screenshot [path]  Take screenshot
+
+${colors.yellow}Secret Detection:${colors.reset}
+  sakaki secrets config     Show detection config
+  sakaki secrets stats      Show detection stats
+  sakaki secrets test <str> Test if string contains secrets
+  sakaki secrets add-pattern <name> <regex> [severity]
+  sakaki secrets add-field <name>
 
 ${colors.yellow}Other:${colors.reset}
   sakaki audit [limit]      View audit log

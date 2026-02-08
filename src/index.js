@@ -25,6 +25,8 @@ const { fastBrowser } = require('./browser/fast-browser');
 const { wsProxy } = require('./realtime/websocket-proxy');
 const { webhookReceiver } = require('./realtime/webhook-receiver');
 const fastHash = require('./security/fast-hash');
+const { secretDetector } = require('./security/secret-detector');
+const { semanticFinder } = require('./browser/semantic-finder');
 
 // Vault verification settings for external services
 const vaultEnforcement = new VaultEnforcementConfig();
@@ -585,6 +587,23 @@ app.post('/vault/proxy', async (req, res) => {
     injectAs
   });
 
+  // Auto-protect secrets in response
+  if (result.success && result.response?.body) {
+    const protection = secretDetector.protectResponse(result.response.body);
+    if (protection.findings.length > 0) {
+      result.response.body = protection.protected;
+      result.secretsDetected = protection.findings.map(f => ({
+        type: f.type,
+        severity: f.severity,
+        path: f.path
+      }));
+      guardian.logAction('secret-detected', {
+        count: protection.findings.length,
+        types: protection.findings.map(f => f.type)
+      }, 'warning', false);
+    }
+  }
+
   res.json(result);
 });
 
@@ -812,6 +831,73 @@ app.get('/scan/image/warning', (req, res) => {
 app.get('/resource-alerts', (req, res) => {
   const limit = parseInt(req.query.limit) || 20;
   res.json(resourceMonitor.getAlerts(limit));
+});
+
+// ========== Secret Detector ==========
+
+// Get secret detector config
+app.get('/secrets/config', (req, res) => {
+  res.json(secretDetector.getConfig());
+});
+
+// Add custom pattern
+app.post('/secrets/pattern', (req, res) => {
+  const { name, pattern, severity } = req.body;
+  if (!name || !pattern) {
+    return res.json({ error: 'name and pattern required' });
+  }
+  try {
+    secretDetector.addPattern(name, pattern, severity || 'high');
+    res.json({ success: true, name, pattern });
+  } catch (e) {
+    res.json({ error: e.message });
+  }
+});
+
+// Remove custom pattern
+app.delete('/secrets/pattern/:name', (req, res) => {
+  secretDetector.removePattern(req.params.name);
+  res.json({ success: true });
+});
+
+// Add sensitive field
+app.post('/secrets/field', (req, res) => {
+  const { field } = req.body;
+  if (!field) {
+    return res.json({ error: 'field required' });
+  }
+  secretDetector.addSensitiveField(field);
+  res.json({ success: true, field });
+});
+
+// Get detection stats
+app.get('/secrets/stats', (req, res) => {
+  res.json(secretDetector.getStats());
+});
+
+// Get detection log
+app.get('/secrets/log', (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+  res.json(secretDetector.getLog(limit));
+});
+
+// Test detection (without storing)
+app.post('/secrets/test', (req, res) => {
+  const { data } = req.body;
+  if (!data) {
+    return res.json({ error: 'data required' });
+  }
+  const result = typeof data === 'string'
+    ? secretDetector.scanString(data)
+    : secretDetector.scanObject(data);
+  res.json(result);
+});
+
+// Enable/disable detection
+app.post('/secrets/enabled', (req, res) => {
+  const { enabled } = req.body;
+  secretDetector.setEnabled(enabled !== false);
+  res.json({ success: true, enabled: secretDetector.enabled });
 });
 
 // Health check
