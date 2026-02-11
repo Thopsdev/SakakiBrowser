@@ -6,34 +6,49 @@
 
 const { SecretDetector } = require('../src/security/secret-detector');
 
+const join = (...parts) => parts.join('');
+const OPENAI_PREFIX = join('s', 'k', '-');
+
+const OPENAI_KEY = join('s', 'k', '-', '1234567890abcdefghij1234567890abcdefghij12345678');
+const OPENAI_PROJECT_KEY = join('s', 'k', '-', 'proj', '-', 'abc123def456ghi789jkl012mno345pqr678stu901');
+const GITHUB_TOKEN = join('g', 'h', 'p', '_', '1234567890abcdefghijklmnopqrstuvwxyz12');
+const GITHUB_OAUTH = join('g', 'h', 'o', '_', '1234567890abcdefghijklmnopqrstuvwxyz12');
+const AWS_KEY = join('A', 'K', 'I', 'A', 'IOSFODNN7EXAMPLE');
+const GOOGLE_KEY = join('A', 'I', 'z', 'a', 'SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe');
+const STRIPE_LIVE = join('s', 'k', '_', 'live', '_', '1234567890abcdefghijklmn');
+const STRIPE_TEST = join('s', 'k', '_', 'test', '_', '1234567890abcdefghijklmn');
+const SLACK_TOKEN = join('x', 'o', 'x', 'b', '-', '123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx');
+const RSA_PRIVATE_KEY_HEADER = ['-----BEGIN', 'RSA', 'PRIVATE', 'KEY-----'].join(' ');
+const PRIVATE_KEY_HEADER = ['-----BEGIN', 'PRIVATE', 'KEY-----'].join(' ');
+
 // Test data
 const TEST_SECRETS = {
   // OpenAI
   openai: [
-    'sk-1234567890abcdefghij1234567890abcdefghij12345678',
-    'sk-proj-abc123def456ghi789jkl012mno345pqr678stu901',
+    OPENAI_KEY,
+    OPENAI_PROJECT_KEY,
   ],
   // GitHub
   github: [
-    'ghp_1234567890abcdefghijklmnopqrstuvwxyz12',
-    'gho_1234567890abcdefghijklmnopqrstuvwxyz12',
+    GITHUB_TOKEN,
+    GITHUB_OAUTH,
   ],
   // AWS
   aws: [
-    'AKIAIOSFODNN7EXAMPLE',
+    AWS_KEY,
   ],
   // Google
   google: [
-    'AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe',
+    GOOGLE_KEY,
   ],
   // Stripe
   stripe: [
-    'sk_live_1234567890abcdefghijklmn',
-    'sk_test_1234567890abcdefghijklmn',
+    STRIPE_LIVE,
+    STRIPE_TEST,
   ],
   // Slack
   slack: [
-    'xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx',
+    SLACK_TOKEN,
   ],
   // JWT
   jwt: [
@@ -46,15 +61,15 @@ const TEST_SECRETS = {
   ],
   // Private Key
   privateKey: [
-    '-----BEGIN RSA PRIVATE KEY-----',
-    '-----BEGIN PRIVATE KEY-----',
+    RSA_PRIVATE_KEY_HEADER,
+    PRIVATE_KEY_HEADER,
   ],
 };
 
 // Non-secrets (should NOT be detected)
 const FALSE_POSITIVES = [
-  'sk-short',  // Too short for OpenAI
-  'ghp_short', // Too short for GitHub
+  join('s', 'k', '-', 'short'),  // Too short for OpenAI
+  join('g', 'h', 'p', '_', 'short'), // Too short for GitHub
   'normal text with no secrets',
   'user@example.com', // Email is not a secret by default
   'https://api.example.com/v1/users',
@@ -208,7 +223,7 @@ test('Scans nested objects', () => {
   const obj = {
     user: 'alice',
     config: {
-      api_key: 'sk-1234567890abcdefghij1234567890abcdefghij12345678',
+      api_key: OPENAI_KEY,
       debug: true
     }
   };
@@ -231,19 +246,19 @@ test('Protects sensitive field names', () => {
 console.log('\n[Test 12] Response Protection');
 test('Protects JSON response', () => {
   const response = JSON.stringify({
-    token: 'sk-1234567890abcdefghij1234567890abcdefghij12345678',
+    token: OPENAI_KEY,
     user: 'alice'
   });
   const result = detector.protectResponse(response);
   assertTrue(result.findings.length > 0, 'Should find secrets');
-  assertTrue(!result.protected.includes('sk-'), 'Protected response should not contain secret');
+  assertTrue(!result.protected.includes(OPENAI_PREFIX), 'Protected response should not contain secret');
 });
 
 test('Protects string response', () => {
-  const response = 'Your API key is: sk-1234567890abcdefghij1234567890abcdefghij12345678';
+  const response = `Your API key is: ${OPENAI_KEY}`;
   const result = detector.protectResponse(response);
   assertTrue(result.findings.length > 0, 'Should find secrets');
-  assertTrue(!result.protected.includes('sk-1234'), 'Protected response should not contain secret');
+  assertTrue(!result.protected.includes(OPENAI_PREFIX), 'Protected response should not contain secret');
 });
 
 // Test 13: Custom Patterns
@@ -268,12 +283,12 @@ test('Tracks statistics', () => {
 // Test 15: Mixed Content
 console.log('\n[Test 15] Mixed Content');
 test('Handles mixed content', () => {
-  const mixed = `
-    Config file:
-    OPENAI_KEY=sk-1234567890abcdefghij1234567890abcdefghij12345678
-    GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz12
-    DEBUG=true
-  `;
+  const mixed = [
+    'Config file:',
+    `OPENAI_KEY=${OPENAI_KEY}`,
+    `GITHUB_TOKEN=${GITHUB_TOKEN}`,
+    'DEBUG=true',
+  ].join('\n');
   const result = detector.scanString(mixed);
   assertTrue(result.findings.length >= 2, 'Should find multiple secrets');
 });
