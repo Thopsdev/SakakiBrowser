@@ -8,6 +8,8 @@ const antivirus = require('./antivirus');
 const vault = require('./vault');
 const threatIntel = require('./threat-intel');
 
+const PUBLIC_ALLOW_HTTP = process.env.SAKAKI_PUBLIC_ALLOW_HTTP === '1';
+
 // Operation log
 const auditLog = [];
 
@@ -49,8 +51,14 @@ async function beforeNavigate(url) {
 
   // HTTP warning
   if (url.startsWith('http://')) {
-    checks.warnings.push('Non-HTTPS connection');
-    checks.risk = RISK_LEVELS.MEDIUM;
+    if (!PUBLIC_ALLOW_HTTP) {
+      checks.warnings.push('HTTP blocked (public lane requires HTTPS)');
+      checks.risk = RISK_LEVELS.HIGH;
+      checks.allowed = false;
+    } else {
+      checks.warnings.push('Non-HTTPS connection');
+      checks.risk = RISK_LEVELS.MEDIUM;
+    }
   }
 
   // Known dangerous domain check (TODO: external list integration)

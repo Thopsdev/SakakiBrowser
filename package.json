@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test:e2e": "node test/e2e/smoke.js"
   },
   "keywords": [
     "browser-automation",
@@ -23,6 +24,8 @@
     "@napi-rs/blake-hash": "^1.3.6",
     "@noble/hashes": "^2.0.1",
     "express": "^4.18.2",
+    "nodemailer": "^6.9.13",
+    "playwright-core": "^1.41.2",
     "puppeteer": "^23.0.0",
     "sharp": "^0.34.5",
     "ws": "^8.19.0"

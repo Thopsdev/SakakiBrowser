@@ -2,7 +2,7 @@
  * Input Sanitizer
  *
  * Prompt injection countermeasures
- * - URL spoofing attacks (ChatGPT Atlas Browser vulnerability)
+ * - URL spoofing abuse (ChatGPT Atlas Browser vulnerability)
  * - Hidden instruction detection
  * - Data and instruction separation
  */

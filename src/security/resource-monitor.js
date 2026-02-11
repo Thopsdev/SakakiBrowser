@@ -149,8 +149,25 @@ async function monitorPage(page, callback) {
   // Get metrics periodically
   const checkInterval = setInterval(async () => {
     try {
-      const metrics = await page.metrics();
-      pageMetrics.jsHeapSize = Math.round(metrics.JSHeapUsedSize / 1024 / 1024);
+      let heapMb = null;
+      if (typeof page.metrics === 'function') {
+        const metrics = await page.metrics();
+        if (metrics && metrics.JSHeapUsedSize) {
+          heapMb = Math.round(metrics.JSHeapUsedSize / 1024 / 1024);
+        }
+      } else if (typeof page.evaluate === 'function') {
+        const jsHeap = await page.evaluate(() => {
+          if (typeof performance !== 'undefined' && performance.memory) {
+            return performance.memory.usedJSHeapSize || 0;
+          }
+          return 0;
+        }).catch(() => 0);
+        if (jsHeap) heapMb = Math.round(jsHeap / 1024 / 1024);
+      }
+
+      if (heapMb !== null) {
+        pageMetrics.jsHeapSize = heapMb;
+      }
 
       if (callback) {
         callback(pageMetrics);

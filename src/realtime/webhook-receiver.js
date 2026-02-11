@@ -123,7 +123,7 @@ class WebhookReceiver {
         .update(typeof payload === 'string' ? payload : JSON.stringify(payload))
         .digest('hex');
 
-    // Compare (timing attack safe)
+    // Compare (timing-safe)
     try {
       const valid = crypto.timingSafeEqual(
         Buffer.from(signature),
