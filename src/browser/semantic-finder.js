@@ -5,6 +5,22 @@
  * Self-healing element identification resistant to UI changes
  */
 
+async function findByXPath(page, xpath) {
+  if (!page || !xpath) return [];
+  if (typeof page.$x === 'function') {
+    return page.$x(xpath);
+  }
+  if (typeof page.locator === 'function') {
+    try {
+      const handles = await page.locator(`xpath=${xpath}`).elementHandles();
+      return handles || [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 class SemanticFinder {
   constructor() {
     // Element type to typical attribute mapping
@@ -248,7 +264,10 @@ class SemanticFinder {
 
     // XPath text search
     try {
-      const [element] = await page.$x(`//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${normalizedText}')]`);
+      const [element] = await findByXPath(
+        page,
+        `//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${normalizedText}')]`
+      );
       if (element) {
         this.stats.successfulSearches++;
         return {

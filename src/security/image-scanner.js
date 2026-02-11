@@ -131,7 +131,7 @@ async function scanImage(imageBuffer) {
             type: 'suspicious_color_pair',
             message: `Detected ${pair.name} combination`,
             severity: 'high',
-            detail: 'Known hidden text attack pattern'
+            detail: 'Known hidden text abuse pattern'
           });
           result.suspicious = true;
         }

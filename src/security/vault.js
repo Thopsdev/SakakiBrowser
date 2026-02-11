@@ -1,7 +1,8 @@
 /**
- * Credential Vault with ZKP-like Protection
+ * Legacy in-process vault (not the isolated Vault process)
  *
- * Protection and leak warning for sensitive data
+ * Used for local protection/detection helpers. The main server uses
+ * src/security/vault-process.js for isolated secret handling.
  */
 
 const crypto = require('crypto');

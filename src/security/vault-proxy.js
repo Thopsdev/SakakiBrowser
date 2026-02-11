@@ -247,7 +247,7 @@ function createVaultVerificationMiddleware(options = {}) {
       }
     }
 
-    // Timestamp verification (replay attack prevention)
+    // Timestamp verification (replay prevention)
     const now = Date.now();
     const requestTime = parseInt(timestamp);
     if (Math.abs(now - requestTime) > 5 * 60 * 1000) {

@@ -5,10 +5,12 @@
  * Reduces startup costs and speeds up operations
  */
 
-const puppeteer = require('puppeteer');
+const { resolveBackendConfig, launchBrowser } = require('./backend');
 
 class BrowserPool {
   constructor(options = {}) {
+    this.backendConfig = options.backendConfig || resolveBackendConfig('main');
+    this.backend = this.backendConfig.backend;
     this.poolSize = options.poolSize || 3;
     this.maxPages = options.maxPages || 10;
     this.browsers = [];
@@ -36,6 +38,7 @@ class BrowserPool {
         '--no-default-browser-check',
         '--safebrowsing-disable-auto-update',
       ],
+      executablePath: this.backendConfig.executablePath || undefined,
       ...options.launchOptions
     };
 
@@ -65,11 +68,11 @@ class BrowserPool {
   async init() {
     if (this.initialized) return;
 
-    console.log(`[BrowserPool] Initializing with ${this.poolSize} browsers...`);
+    console.log(`[BrowserPool] Initializing with ${this.poolSize} browsers (${this.backend})...`);
 
     // Pre-launch browsers
     for (let i = 0; i < this.poolSize; i++) {
-      const browser = await puppeteer.launch(this.launchOptions);
+      const browser = await launchBrowser(this.backendConfig, this.launchOptions);
       this.browsers.push(browser);
 
       // Pre-create pages
@@ -89,20 +92,37 @@ class BrowserPool {
     this.stats.pagesCreated++;
 
     // Viewport settings
-    await page.setViewport({ width: 1280, height: 800 });
+    if (typeof page.setViewportSize === 'function') {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    } else {
+      await page.setViewport({ width: 1280, height: 800 });
+    }
 
     // Resource blocking
     if (this.blockResources) {
-      await page.setRequestInterception(true);
-      page.on('request', (req) => {
-        this.stats.totalRequests++;
-        if (this.blockedTypes.includes(req.resourceType())) {
-          this.stats.blockedRequests++;
-          req.abort();
-        } else {
-          req.continue();
-        }
-      });
+      if (this.backend === 'playwright') {
+        await page.route('**/*', async (route) => {
+          const req = route.request();
+          this.stats.totalRequests++;
+          if (this.blockedTypes.includes(req.resourceType())) {
+            this.stats.blockedRequests++;
+            await route.abort();
+          } else {
+            await route.continue();
+          }
+        });
+      } else {
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          this.stats.totalRequests++;
+          if (this.blockedTypes.includes(req.resourceType())) {
+            this.stats.blockedRequests++;
+            req.abort();
+          } else {
+            req.continue();
+          }
+        });
+      }
     }
 
     // Timeout settings

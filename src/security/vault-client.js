@@ -3,16 +3,27 @@
  *
  * Client that communicates with the isolated Vault process
  * - Secret values do not pass through this process
- * - retrieve() is intentionally absent
+ * - No public retrieve() API
  */
 
 const net = require('net');
 const { spawn } = require('child_process');
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 
-const SOCKET_PATH = process.env.VAULT_SOCKET || '/tmp/sakaki-vault.sock';
+const DEFAULT_SOCKET_PATH = path.join(os.homedir(), '.sakaki', 'vault.sock');
+const SOCKET_PATH = process.env.VAULT_SOCKET || DEFAULT_SOCKET_PATH;
 const VAULT_PROCESS = path.join(__dirname, 'vault-process.js');
+
+function ensureSocketDir() {
+  const dir = path.dirname(SOCKET_PATH);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch {
+    // Ignore errors; socket creation will fail if path is invalid
+  }
+}
 
 class VaultClient {
   constructor() {
@@ -20,16 +31,40 @@ class VaultClient {
     this.initialized = false;
   }
 
+  async isSocketAlive() {
+    return new Promise((resolve) => {
+      const socket = net.createConnection(SOCKET_PATH);
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 500);
+      socket.on('connect', () => {
+        clearTimeout(timer);
+        socket.end();
+        resolve(true);
+      });
+      socket.on('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+  }
+
   /**
    * Start the Vault process
    */
   async startVaultProcess() {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
+      ensureSocketDir();
       // If socket exists, process is already running
       if (fs.existsSync(SOCKET_PATH)) {
-        console.log('[VaultClient] Vault process already running');
-        resolve();
-        return;
+        const alive = await this.isSocketAlive();
+        if (alive) {
+          console.log('[VaultClient] Vault process already running');
+          resolve();
+          return;
+        }
+        try { fs.unlinkSync(SOCKET_PATH); } catch {}
       }
 
       console.log('[VaultClient] Starting vault process...');
@@ -209,6 +244,13 @@ class VaultClient {
         error: e.message
       };
     }
+  }
+
+  /**
+   * Execute browser actions inside Vault process
+   */
+  async browserExecute(params) {
+    return await this.send('browserExecute', params || {});
   }
 
   /**

@@ -7,8 +7,11 @@
  * + Phishing detection + Rate limiting + Resource monitoring
  */
 
-const puppeteer = require('puppeteer');
 const express = require('express');
+const crypto = require('crypto');
+const net = require('net');
+const http = require('http');
+const WebSocket = require('ws');
 const antivirus = require('./security/antivirus');
 const vault = require('./security/vault');
 const { vaultClient, detectSensitiveData } = require('./security/vault-client');
@@ -22,8 +25,11 @@ const imageScanner = require('./security/image-scanner');
 const { ZKPProvider, createZKPMiddleware } = require('./plugins/zkp-provider');
 const { VaultProxy, createVaultVerificationMiddleware, VaultEnforcementConfig } = require('./security/vault-proxy');
 const { fastBrowser } = require('./browser/fast-browser');
+const { resolveBackendConfig, launchBrowser, normalizeWaitUntil } = require('./browser/backend');
+const { attachRequestInterception } = require('./browser/request-interceptor');
 const { wsProxy } = require('./realtime/websocket-proxy');
 const { webhookReceiver } = require('./realtime/webhook-receiver');
+const { notificationCenter } = require('./realtime/notification-center');
 const fastHash = require('./security/fast-hash');
 const { secretDetector } = require('./security/secret-detector');
 const { semanticFinder } = require('./browser/semantic-finder');
@@ -32,21 +38,341 @@ const { semanticFinder } = require('./browser/semantic-finder');
 const vaultEnforcement = new VaultEnforcementConfig();
 
 const app = express();
-app.use(express.json());
+const MAX_JSON_SIZE = process.env.SAKAKI_JSON_LIMIT || '1mb';
+app.use(express.json({ limit: MAX_JSON_SIZE }));
+
+const BIND = process.env.SAKAKI_BIND || process.env.HOST || '127.0.0.1';
+const ADMIN_TOKEN = process.env.SAKAKI_ADMIN_TOKEN || '';
+const ALLOW_INSECURE_VAULT = process.env.SAKAKI_ALLOW_INSECURE_VAULT === '1';
+const SECURE_ALLOWED_DOMAINS = (process.env.SAKAKI_SECURE_ALLOWED_DOMAINS || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+const SECURE_ALLOW_SUBDOMAINS = process.env.SAKAKI_SECURE_ALLOW_SUBDOMAINS === '1';
+const SECURE_ALLOW_HTTP = process.env.SAKAKI_SECURE_ALLOW_HTTP === '1';
+const SECURE_ALLOW_SENSITIVE = process.env.SAKAKI_SECURE_ALLOW_SENSITIVE === '1';
+const SECURE_ALLOW_PRIVATE = process.env.SAKAKI_SECURE_ALLOW_PRIVATE === '1';
+const VAULT_BROWSER_ALLOW_PRIVATE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
+const VAULT_BROWSER_ALLOW_SENSITIVE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE === '1';
+const VAULT_BROWSER_MAX_ACTIONS = parseInt(
+  process.env.SAKAKI_VAULT_BROWSER_MAX_ACTIONS || '50',
+  10
+);
+const REMOTE_VIEW_ENABLED = process.env.SAKAKI_REMOTE_VIEW === '1';
+const REMOTE_VIEW_MAX_SESSIONS = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_MAX_SESSIONS || '3',
+  10
+);
+const REMOTE_VIEW_TTL_MS = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_TTL_MS || '900000',
+  10
+);
+const REMOTE_VIEW_MAX_TTL_MS = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_MAX_TTL_MS || String(REMOTE_VIEW_TTL_MS * 2),
+  10
+);
+const REMOTE_VIEW_IDLE_TIMEOUT_MS = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_IDLE_TIMEOUT_MS || '120000',
+  10
+);
+const REMOTE_VIEW_ACTIVITY_EXTEND_MS = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_ACTIVITY_EXTEND_MS || String(REMOTE_VIEW_TTL_MS),
+  10
+);
+const REMOTE_VIEW_DEFAULT_FPS = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_FPS || '5',
+  10
+);
+const REMOTE_VIEW_DEFAULT_QUALITY = parseInt(
+  process.env.SAKAKI_REMOTE_VIEW_QUALITY || '60',
+  10
+);
+const REMOTE_VIEW_ALLOW_TEXT = process.env.SAKAKI_REMOTE_VIEW_ALLOW_TEXT === '1';
+const REMOTE_VIEW_ALLOW_SCROLL = process.env.SAKAKI_REMOTE_VIEW_ALLOW_SCROLL !== '0';
+const REMOTE_VIEW_BLOCK_SENSITIVE = process.env.SAKAKI_REMOTE_VIEW_BLOCK_SENSITIVE !== '0';
+const CHALLENGE_AUTO_REMOTE = process.env.SAKAKI_CHALLENGE_AUTO_REMOTE !== '0';
+const CHALLENGE_NOTIFY_COOLDOWN_MS = parseInt(
+  process.env.SAKAKI_CHALLENGE_NOTIFY_COOLDOWN_MS || '60000',
+  10
+);
+const CHALLENGE_TEXT_LIMIT = parseInt(
+  process.env.SAKAKI_CHALLENGE_TEXT_LIMIT || '2000',
+  10
+);
+const CHALLENGE_MIN_SCORE = parseInt(
+  process.env.SAKAKI_CHALLENGE_MIN_SCORE || '2',
+  10
+);
+const CHALLENGE_DOMAIN_IGNORE = (process.env.SAKAKI_CHALLENGE_DOMAIN_IGNORE || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+const CHALLENGE_DOMAIN_FORCE = (process.env.SAKAKI_CHALLENGE_DOMAIN_FORCE || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+const HEADLESS_MODE = parseHeadlessMode(
+  process.env.SAKAKI_HEADLESS_MODE || process.env.SAKAKI_HEADLESS
+);
+const PUPPETEER_EXTRA_ARGS = parseListValue(
+  process.env.SAKAKI_PUPPETEER_ARGS || process.env.SAKAKI_CHROME_ARGS || ''
+);
+const PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
+
+let BACKEND_CONFIG;
+try {
+  BACKEND_CONFIG = resolveBackendConfig('main');
+} catch (e) {
+  console.error(`[Sakaki-Browser] ${e.message}`);
+  process.exit(1);
+}
+const BROWSER_BACKEND = BACKEND_CONFIG.backend;
+const WAIT_UNTIL_NETWORK_IDLE = normalizeWaitUntil('networkidle2', BROWSER_BACKEND);
+
+notificationCenter.configureFromEnv(process.env);
+
+function isLocalRequest(req) {
+  const addr = req.socket?.remoteAddress || '';
+  return (
+    addr === '127.0.0.1' ||
+    addr === '::1' ||
+    addr.startsWith('::ffff:127.0.0.1')
+  );
+}
+
+function normalizeHost(hostname) {
+  return (hostname || '').toLowerCase().replace(/\.$/, '');
+}
+
+function parseListValue(raw) {
+  if (!raw) return [];
+  const sep = raw.includes(';') ? ';' : ',';
+  return raw.split(sep).map(s => s.trim()).filter(Boolean);
+}
+
+function parseHeadlessMode(raw) {
+  if (raw === undefined || raw === null || raw === '') return true;
+  const v = String(raw).toLowerCase().trim();
+  if (v === 'false' || v === '0' || v === 'off' || v === 'no') return false;
+  if (v === 'new') return 'new';
+  return true;
+}
+
+function parseRegexList(value) {
+  if (!value) return [];
+  const trimmed = String(value).trim();
+  let list = [];
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {}
+  }
+  if (!list.length) {
+    const sep = trimmed.includes(';') ? ';' : ',';
+    list = trimmed.split(sep).map(s => s.trim()).filter(Boolean);
+  }
+  return list.map((pattern) => {
+    const m = pattern.match(/^\/(.+)\/([gimsuy]*)$/);
+    try {
+      if (m) return new RegExp(m[1], m[2] || 'i');
+      return new RegExp(pattern, 'i');
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+function domainMatches(hostname, list) {
+  const host = normalizeHost(hostname);
+  if (!host) return false;
+  return list.some((d) => host === d || host.endsWith('.' + d));
+}
+
+function isPrivateIPv4(ip) {
+  const parts = ip.split('.').map(n => parseInt(n, 10));
+  if (parts.length !== 4 || parts.some(n => Number.isNaN(n))) return false;
+  const [a, b] = parts;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+function isPrivateIPv6(ip) {
+  const host = ip.toLowerCase();
+  if (host === '::1') return true;
+  if (host.startsWith('fe80:')) return true;
+  if (host.startsWith('fc') || host.startsWith('fd')) return true;
+  if (host.startsWith('::ffff:')) {
+    const v4 = host.replace('::ffff:', '');
+    return isPrivateIPv4(v4);
+  }
+  return false;
+}
+
+function isPrivateHost(hostname) {
+  const host = normalizeHost(hostname);
+  const version = net.isIP(host);
+  if (version === 4) return isPrivateIPv4(host);
+  if (version === 6) return isPrivateIPv6(host);
+  return false;
+}
+
+function isHostAllowedForList(hostname, allowedDomains, allowSubdomains) {
+  const host = normalizeHost(hostname);
+  if (!allowedDomains.length) return false;
+  if (allowedDomains.includes(host)) return true;
+  if (!allowSubdomains) return false;
+  return allowedDomains.some(domain => host === domain || host.endsWith(`.${domain}`));
+}
+
+function isHostAllowed(hostname) {
+  return isHostAllowedForList(hostname, SECURE_ALLOWED_DOMAINS, SECURE_ALLOW_SUBDOMAINS);
+}
+
+function checkSecureUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (e) {
+    return { ok: false, error: 'Invalid URL' };
+  }
+  if (!SECURE_ALLOW_HTTP && parsed.protocol !== 'https:') {
+    return { ok: false, error: 'HTTPS required in secure lane' };
+  }
+  if (!SECURE_ALLOW_PRIVATE && (isPrivateHost(parsed.hostname) || parsed.hostname.endsWith('.local'))) {
+    return { ok: false, error: 'Private/local targets are blocked in secure lane' };
+  }
+  if (!isHostAllowed(parsed.hostname)) {
+    return { ok: false, error: 'Domain not allowed in secure lane' };
+  }
+  return { ok: true, parsed };
+}
+
+function checkAllowedUrl(url, allowedDomains, allowSubdomains, allowHttp) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (e) {
+    return { ok: false, error: 'Invalid URL' };
+  }
+  if (!allowHttp && parsed.protocol !== 'https:') {
+    return { ok: false, error: 'HTTPS required' };
+  }
+  if (isPrivateHost(parsed.hostname) || parsed.hostname.endsWith('.local')) {
+    return { ok: false, error: 'Private/local targets are blocked' };
+  }
+  if (!isHostAllowedForList(parsed.hostname, allowedDomains, allowSubdomains)) {
+    return { ok: false, error: 'Domain not allowed' };
+  }
+  return { ok: true, parsed };
+}
+
+function validateBrowserActions(actions, allowSensitive) {
+  if (!Array.isArray(actions) || actions.length === 0) {
+    return { ok: false, error: 'actions array required' };
+  }
+  if (actions.length > VAULT_BROWSER_MAX_ACTIONS) {
+    return { ok: false, error: `actions exceeds max (${VAULT_BROWSER_MAX_ACTIONS})` };
+  }
+  if (allowSensitive) {
+    return { ok: true };
+  }
+
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue;
+    if (action.type === 'type' && typeof action.text === 'string') {
+      const warnings = detectSensitiveData(action.text);
+      if (warnings.length > 0) {
+        return {
+          ok: false,
+          error: 'Sensitive input blocked for vault browser',
+          warnings
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+function requireRemoteViewEnabled(req, res, next) {
+  if (!REMOTE_VIEW_ENABLED) {
+    return res.status(404).json({ error: 'Remote view disabled' });
+  }
+  return next();
+}
+
+function extractAdminToken(req) {
+  const auth = req.headers.authorization || '';
+  if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+  if (auth.startsWith('Token ')) return auth.slice(6).trim();
+  return (
+    req.headers['x-api-key'] ||
+    req.headers['x-admin-token'] ||
+    ''
+  ).toString().trim();
+}
+
+function isAdminRequest(req) {
+  if (ADMIN_TOKEN) {
+    const token = extractAdminToken(req);
+    return token === ADMIN_TOKEN;
+  }
+  if (ALLOW_INSECURE_VAULT || isLocalRequest(req)) {
+    return true;
+  }
+  return false;
+}
+
+function requireVaultAdmin(req, res, next) {
+  if (isAdminRequest(req)) return next();
+  return res.status(403).json({ error: 'Vault admin token required for non-local access' });
+}
 
 let browser = null;
 let vaultInitialized = false;
 
+// Protect Vault endpoints by default
+app.use('/vault', requireVaultAdmin);
+
 // ZKP Provider (for service providers)
 const zkpProvider = new ZKPProvider({ name: 'sakaki-main' });
 
+// Protect all ZKP endpoints by default
+app.use('/zkp', requireVaultAdmin);
+
+// Protect secure lane endpoints
+app.use('/secure', requireVaultAdmin);
+
 // Browser initialization
 async function initBrowser() {
-  browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  const baseArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-crashpad',
+    '--disable-gpu',
+    '--disable-dev-shm-usage',
+    ...PUPPETEER_EXTRA_ARGS
+  ];
+  const fallbackArgs = [...baseArgs, '--no-zygote', '--single-process'];
+  const launch = (args) => launchBrowser(BACKEND_CONFIG, {
+    headless: HEADLESS_MODE,
+    args
   });
-  console.log('[Sakaki-Browser] Browser initialized');
+  if (PUPPETEER_FORCE_SINGLE_PROCESS) {
+    browser = await launch(fallbackArgs);
+  } else {
+    browser = await launch(baseArgs).catch(() => launch(fallbackArgs));
+  }
+  const label = `${BACKEND_CONFIG.backend}/${BACKEND_CONFIG.browserType}`;
+  const extra = BACKEND_CONFIG.executablePath ? ` (${BACKEND_CONFIG.executablePath})` : '';
+  console.log(`[Sakaki-Browser] Browser initialized: ${label}${extra}`);
 }
 
 // Comprehensive security check
@@ -58,7 +384,7 @@ async function fullSecurityCheck(url, page = null) {
     risk: 'safe'
   };
 
-  // 0. Input sanitization (URL spoofing attack countermeasure)
+  // 0. Input sanitization (URL spoofing countermeasure)
   const sanitizeCheck = inputSanitizer.sanitizeInput(url, 'url');
   results.checks.sanitizer = sanitizeCheck;
   if (sanitizeCheck.blocked) {
@@ -101,6 +427,678 @@ async function fullSecurityCheck(url, page = null) {
 // Current page state for sequential operations
 let currentPage = null;
 let currentMonitor = null;
+let securePage = null;
+let secureMonitor = null;
+
+const remoteSessions = new Map(); // sessionId -> session
+
+function getLanePage(lane) {
+  if (lane === 'secure') return securePage;
+  if (lane === 'public') return currentPage;
+  return null;
+}
+
+function randomId(bytes = 16) {
+  return crypto.randomBytes(bytes).toString('hex');
+}
+
+async function getViewportSize(page) {
+  try {
+    const vp = typeof page.viewport === 'function'
+      ? page.viewport()
+      : (typeof page.viewportSize === 'function' ? page.viewportSize() : null);
+    if (vp && vp.width && vp.height) {
+      return { width: vp.width, height: vp.height };
+    }
+    return await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight
+    }));
+  } catch {
+    return { width: 0, height: 0 };
+  }
+}
+
+async function screenshotBase64(page, options = {}) {
+  if (!page || typeof page.screenshot !== 'function') return null;
+  const opts = { ...options, encoding: 'base64' };
+  try {
+    return await page.screenshot(opts);
+  } catch {
+    const { encoding, ...rest } = opts;
+    const buffer = await page.screenshot(rest);
+    return buffer ? buffer.toString('base64') : null;
+  }
+}
+
+function signRemotePayload(key, payload) {
+  const signature = crypto.createHmac('sha256', key).update(payload).digest('hex');
+  return { signature, algorithm: 'sha256-hmac' };
+}
+
+function verifyRemotePayload(key, payload, signature) {
+  const expected = crypto.createHmac('sha256', key).update(payload).digest('hex');
+  return expected === signature;
+}
+
+function sanitizeRemoteText(text) {
+  if (!REMOTE_VIEW_BLOCK_SENSITIVE) return { ok: true };
+  const warnings = detectSensitiveData(text);
+  if (warnings.length > 0) {
+    return { ok: false, warnings };
+  }
+  return { ok: true };
+}
+
+const challengeCooldown = new WeakMap();
+const challengeResolvedCooldown = new WeakMap();
+const challengeState = new WeakMap();
+
+const CHALLENGE_URL_PATTERNS = [
+  /captcha/i,
+  /challenge/i,
+  /verify/i,
+  /verification/i,
+  /two[-_]?factor/i,
+  /\\b2fa\\b/i,
+  /\\bmfa\\b/i,
+  /\\botp\\b/i,
+  /turnstile/i,
+  /cloudflare/i,
+  /arkoselabs/i
+];
+const CHALLENGE_URL_EXTRA = parseRegexList(process.env.SAKAKI_CHALLENGE_URL_REGEX);
+
+const CHALLENGE_TEXT_PATTERNS = [
+  /verify (you are|you're) human/i,
+  /i am not a robot/i,
+  /security check/i,
+  /verification code/i,
+  /one[- ]time code/i,
+  /authentication code/i,
+  /enter.*code/i,
+  /two[- ]factor/i,
+  /multi[- ]factor/i,
+  /captcha/i,
+  /robot check/i
+];
+const CHALLENGE_TEXT_EXTRA = parseRegexList(process.env.SAKAKI_CHALLENGE_TEXT_REGEX);
+
+const CHALLENGE_SELECTORS = [
+  'iframe[src*="recaptcha"]',
+  'iframe[src*="hcaptcha"]',
+  'iframe[src*="turnstile"]',
+  'iframe[src*="arkoselabs"]',
+  'div.g-recaptcha',
+  'div.h-captcha',
+  'input[name*="captcha"]',
+  '[id*="captcha"]'
+];
+const CHALLENGE_SELECTOR_EXTRA = (() => {
+  const raw = process.env.SAKAKI_CHALLENGE_SELECTOR || '';
+  if (!raw) return [];
+  const sep = raw.includes(';') ? ';' : ',';
+  return raw.split(sep).map(s => s.trim()).filter(Boolean);
+})();
+
+function shouldNotifyChallenge(page) {
+  if (!page) return true;
+  const now = Date.now();
+  const last = challengeCooldown.get(page);
+  if (last && (now - last) < CHALLENGE_NOTIFY_COOLDOWN_MS) {
+    return false;
+  }
+  challengeCooldown.set(page, now);
+  return true;
+}
+
+function shouldNotifyResolved(page) {
+  if (!page) return true;
+  const now = Date.now();
+  const last = challengeResolvedCooldown.get(page);
+  if (last && (now - last) < CHALLENGE_NOTIFY_COOLDOWN_MS) {
+    return false;
+  }
+  challengeResolvedCooldown.set(page, now);
+  return true;
+}
+
+function getChallengeState(page) {
+  if (!page) return { active: false };
+  let state = challengeState.get(page);
+  if (!state) {
+    state = { active: false, kind: null, evidence: [], url: null };
+    challengeState.set(page, state);
+  }
+  return state;
+}
+
+function shouldNotifySession(session, key) {
+  const now = Date.now();
+  const last = session[key] || 0;
+  if (now - last < CHALLENGE_NOTIFY_COOLDOWN_MS) return false;
+  session[key] = now;
+  return true;
+}
+
+async function handleVaultChallengeResult(session, result, lane) {
+  if (!result || !result.success) return;
+  if (!result.detected) {
+    if (session.challengeActive) {
+      session.challengeActive = false;
+      if (shouldNotifySession(session, 'lastChallengeResolvedAt')) {
+        notificationCenter.notify({
+          type: 'challenge_resolved',
+          severity: 'info',
+          message: `Challenge resolved (${session.challengeKind || 'unknown'})`,
+          data: {
+            lane,
+            url: session.challengeUrl || null,
+            kind: session.challengeKind,
+            evidence: session.challengeEvidence || []
+          }
+        });
+      }
+      if (session.autoStopOnResolve) {
+        closeRemoteSession(session.id, 'challenge_resolved');
+      }
+    }
+    return;
+  }
+
+  session.challengeActive = true;
+  session.challengeKind = result.kind;
+  session.challengeEvidence = result.evidence || [];
+  session.challengeUrl = result.url || null;
+
+  if (shouldNotifySession(session, 'lastChallengeNotifyAt')) {
+    const view = buildRemoteViewInfo(session);
+    notificationCenter.notify({
+      type: 'challenge_required',
+      severity: 'warn',
+      message: `Challenge detected (${result.kind})`,
+      data: {
+        lane,
+        url: session.challengeUrl,
+        kind: result.kind,
+        score: result.score,
+        threshold: result.threshold,
+        evidence: result.evidence || [],
+        viewUrl: view?.viewUrl || null
+      }
+    });
+  }
+}
+
+async function maybeCheckChallengeForPage(session, page, lane) {
+  const now = Date.now();
+  if (now - (session.lastChallengeCheckAt || 0) < 1000) return;
+  session.lastChallengeCheckAt = now;
+  await handleChallenge({ lane, page, url: page.url() });
+}
+
+function findRemoteSessionForPage(page) {
+  if (!page) return null;
+  for (const session of remoteSessions.values()) {
+    if (session.page === page) return session;
+  }
+  return null;
+}
+
+function buildRemoteViewInfo(session) {
+  if (!session) return null;
+  return {
+    sessionId: session.id,
+    viewUrl: `/remote/view/${session.id}?token=${session.token}`,
+    expiresAt: session.expiresAt
+  };
+}
+
+function touchRemoteSession(session) {
+  const now = Date.now();
+  session.lastActivityAt = now;
+  if (REMOTE_VIEW_ACTIVITY_EXTEND_MS > 0) {
+    const next = now + REMOTE_VIEW_ACTIVITY_EXTEND_MS;
+    session.expiresAt = Math.min(session.maxExpiresAt, next);
+  }
+}
+
+function startRemoteSession({
+  lane,
+  page,
+  vaultSessionId,
+  lastSize,
+  allowInput,
+  allowText,
+  allowScroll,
+  fps,
+  quality,
+  autoStopOnResolve
+}) {
+  if (remoteSessions.size >= REMOTE_VIEW_MAX_SESSIONS) {
+    return { success: false, error: 'Too many remote sessions' };
+  }
+
+  const sessionId = randomId(12);
+  const token = randomId(16);
+  const key = Buffer.from(token, 'hex');
+  const now = Date.now();
+  const maxTtl = Number.isFinite(REMOTE_VIEW_MAX_TTL_MS) && REMOTE_VIEW_MAX_TTL_MS > 0
+    ? REMOTE_VIEW_MAX_TTL_MS
+    : REMOTE_VIEW_TTL_MS;
+
+  const session = {
+    id: sessionId,
+    token,
+    key,
+    lane,
+    page: page || null,
+    vaultSessionId: vaultSessionId || null,
+    fps: Math.min(Math.max(parseInt(fps, 10) || REMOTE_VIEW_DEFAULT_FPS, 1), 15),
+    quality: Math.min(Math.max(parseInt(quality, 10) || REMOTE_VIEW_DEFAULT_QUALITY, 30), 90),
+    allowInput: !!allowInput,
+    allowText: !!allowText,
+    allowScroll: !!allowScroll,
+    createdAt: now,
+    expiresAt: now + REMOTE_VIEW_TTL_MS,
+    maxExpiresAt: now + maxTtl,
+    clients: new Set(),
+    lastFrameHash: null,
+    lastSize: lastSize || { width: 0, height: 0 },
+    lastCounter: 0,
+    lastCommandCounter: 0,
+    lastActivityAt: now,
+    lastChallengeCheckAt: 0,
+    challengeActive: false,
+    challengeKind: null,
+    challengeEvidence: [],
+    challengeUrl: null,
+    lastChallengeNotifyAt: 0,
+    lastChallengeResolvedAt: 0,
+    autoStopOnResolve: !!autoStopOnResolve
+  };
+
+  remoteSessions.set(sessionId, session);
+
+  session.timer = setInterval(async () => {
+    const now = Date.now();
+    if (now > session.expiresAt) {
+      closeRemoteSession(sessionId, 'expired');
+      return;
+    }
+    if (REMOTE_VIEW_IDLE_TIMEOUT_MS > 0 && (now - (session.lastActivityAt || 0)) > REMOTE_VIEW_IDLE_TIMEOUT_MS) {
+      closeRemoteSession(sessionId, 'idle_timeout');
+      return;
+    }
+
+    if (session.clients.size > 0) {
+      touchRemoteSession(session);
+    }
+
+    try {
+      let screenshot;
+      let size = session.lastSize;
+      let hash;
+
+      if (session.lane === 'vault') {
+        if (!session.vaultSessionId) {
+          closeRemoteSession(sessionId, 'vault_missing');
+          return;
+        }
+        const frame = await vaultClient.send('browserRemoteFrame', {
+          sessionId: session.vaultSessionId,
+          quality: session.quality,
+          force: session.lastFrameHash === null
+        });
+        if (!frame.success) {
+          closeRemoteSession(sessionId, 'vault_error');
+          return;
+        }
+        if (!frame.changed) {
+          return;
+        }
+        screenshot = Buffer.from(frame.data, 'base64');
+        size = frame.size || size;
+        hash = frame.hash || fastHash.hash(screenshot).hash;
+        session.lastSize = size;
+      } else {
+        if (!session.page || session.page.isClosed()) {
+          closeRemoteSession(sessionId, 'page_closed');
+          return;
+        }
+        screenshot = await session.page.screenshot({
+          type: 'jpeg',
+          quality: session.quality
+        });
+        hash = fastHash.hash(screenshot).hash;
+        size = await getViewportSize(session.page);
+        session.lastSize = size;
+      }
+
+      if (hash === session.lastFrameHash) {
+        return;
+      }
+      session.lastFrameHash = hash;
+
+      const counter = ++session.lastCounter;
+      const ts = Date.now();
+      const payload = Buffer.concat([
+        Buffer.from(`${counter}|${ts}|`),
+        screenshot
+      ]);
+      const signed = signRemotePayload(session.key, payload);
+
+      const frameMsg = JSON.stringify({
+        type: 'frame',
+        counter,
+        ts,
+        width: size.width,
+        height: size.height,
+        hash,
+        alg: signed.algorithm,
+        sig: signed.signature,
+        data: screenshot.toString('base64')
+      });
+
+      for (const ws of session.clients) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(frameMsg);
+        }
+      }
+    } catch (err) {
+      // Ignore transient errors
+    }
+  }, Math.max(1000 / session.fps, 50));
+
+  return {
+    success: true,
+    sessionId,
+    viewUrl: `/remote/view/${sessionId}?token=${token}`,
+    expiresAt: session.expiresAt
+  };
+}
+
+async function detectChallenge(page) {
+  if (!page || page.isClosed()) return { detected: false };
+  const evidence = [];
+  let url = '';
+  let title = '';
+
+  try { url = page.url(); } catch {}
+  try { title = await page.title(); } catch {}
+
+  const urlLower = (url || '').toLowerCase();
+  const titleLower = (title || '').toLowerCase();
+  let hostname = '';
+  try {
+    hostname = new URL(url).hostname;
+  } catch {}
+
+  if (hostname && domainMatches(hostname, CHALLENGE_DOMAIN_IGNORE)) {
+    return { detected: false, skipped: 'domain_ignore', url, title };
+  }
+  if (hostname && domainMatches(hostname, CHALLENGE_DOMAIN_FORCE)) {
+    return {
+      detected: true,
+      kind: 'challenge',
+      score: CHALLENGE_MIN_SCORE,
+      threshold: CHALLENGE_MIN_SCORE,
+      url,
+      title,
+      evidence: [`domain:${hostname}`]
+    };
+  }
+
+  for (const pattern of CHALLENGE_URL_PATTERNS.concat(CHALLENGE_URL_EXTRA)) {
+    if (pattern.test(urlLower)) {
+      evidence.push(`url:${pattern}`);
+      break;
+    }
+  }
+
+  for (const pattern of CHALLENGE_URL_PATTERNS.concat(CHALLENGE_URL_EXTRA)) {
+    if (pattern.test(titleLower)) {
+      evidence.push(`title:${pattern}`);
+      break;
+    }
+  }
+
+  for (const sel of CHALLENGE_SELECTORS.concat(CHALLENGE_SELECTOR_EXTRA)) {
+    try {
+      const el = await page.$(sel);
+      if (el) {
+        evidence.push(`selector:${sel}`);
+        break;
+      }
+    } catch {}
+  }
+
+  if (CHALLENGE_TEXT_LIMIT > 0) {
+    try {
+      const text = await page.evaluate((limit) => {
+        const body = document.body;
+        const t = body ? body.innerText || '' : '';
+        return t.slice(0, limit);
+      }, CHALLENGE_TEXT_LIMIT);
+
+      for (const pattern of CHALLENGE_TEXT_PATTERNS.concat(CHALLENGE_TEXT_EXTRA)) {
+        if (pattern.test(text)) {
+          evidence.push(`text:${pattern}`);
+          break;
+        }
+      }
+    } catch {}
+  }
+
+  if (evidence.length === 0) {
+    return { detected: false };
+  }
+
+  let score = 0;
+  for (const ev of evidence) {
+    if (ev.startsWith('selector:')) score += 3;
+    else if (ev.startsWith('url:')) score += 2;
+    else if (ev.startsWith('title:')) score += 1;
+    else if (ev.startsWith('text:')) score += 2;
+  }
+
+  if (score < CHALLENGE_MIN_SCORE) {
+    return {
+      detected: false,
+      score,
+      threshold: CHALLENGE_MIN_SCORE,
+      evidence,
+      url,
+      title
+    };
+  }
+
+  const evidenceStr = evidence.join(' ');
+  let kind = 'challenge';
+  if (/captcha|recaptcha|hcaptcha|turnstile|arkoselabs/i.test(evidenceStr)) {
+    kind = 'captcha';
+  } else if (/two[-_]?factor|\\b2fa\\b|\\bmfa\\b|\\botp\\b|verification code|one[- ]time/i.test(evidenceStr)) {
+    kind = 'mfa';
+  }
+
+  return {
+    detected: true,
+    kind,
+    score,
+    threshold: CHALLENGE_MIN_SCORE,
+    url,
+    title,
+    evidence
+  };
+}
+
+async function handleChallenge({ lane, page, url }) {
+  const state = getChallengeState(page);
+  const challenge = await detectChallenge(page);
+  if (!challenge.detected) {
+    if (state.active) {
+      state.active = false;
+      const existing = findRemoteSessionForPage(page);
+      if (existing && existing.autoStopOnResolve) {
+        closeRemoteSession(existing.id, 'challenge_resolved');
+      }
+      if (shouldNotifyResolved(page)) {
+        notificationCenter.notify({
+          type: 'challenge_resolved',
+          severity: 'info',
+          message: `Challenge resolved (${state.kind || 'unknown'})`,
+          data: {
+            lane,
+            url: state.url || url || null,
+            kind: state.kind,
+            evidence: state.evidence || []
+          }
+        });
+      }
+    }
+    return null;
+  }
+
+  state.active = true;
+  state.kind = challenge.kind;
+  state.evidence = challenge.evidence;
+  state.url = challenge.url || url || null;
+
+  let remoteView = null;
+  if (REMOTE_VIEW_ENABLED && CHALLENGE_AUTO_REMOTE) {
+    const existing = findRemoteSessionForPage(page);
+    if (existing) {
+      remoteView = buildRemoteViewInfo(existing);
+    } else {
+      const allowText = challenge.kind === 'mfa';
+      const started = startRemoteSession({
+        lane,
+        page,
+        allowInput: true,
+        allowText,
+        allowScroll: true,
+        autoStopOnResolve: true
+      });
+      remoteView = started.success ? {
+        sessionId: started.sessionId,
+        viewUrl: started.viewUrl,
+        expiresAt: started.expiresAt
+      } : { error: started.error };
+    }
+  }
+
+  let eventId = null;
+  if (shouldNotifyChallenge(page)) {
+    const event = notificationCenter.notify({
+      type: 'challenge_required',
+      severity: 'warn',
+      message: `Challenge detected (${challenge.kind})`,
+      data: {
+        lane,
+        url: url || challenge.url,
+        kind: challenge.kind,
+        score: challenge.score,
+        threshold: challenge.threshold,
+        evidence: challenge.evidence,
+        viewUrl: remoteView?.viewUrl || null
+      }
+    });
+    eventId = event.id;
+  }
+
+  return {
+    blocked: true,
+    reason: 'challenge_required',
+    challenge: {
+      kind: challenge.kind,
+      score: challenge.score,
+      threshold: challenge.threshold,
+      evidence: challenge.evidence,
+      url: url || challenge.url
+    },
+    remoteView,
+    eventId
+  };
+}
+
+function notifyApprovalRequired({ lane, reason, url, warnings, fields, selector }) {
+  try {
+    notificationCenter.notify({
+      type: 'approval_required',
+      severity: 'warn',
+      message: reason || 'Human approval required',
+      data: {
+        lane: lane || 'default',
+        url: url || null,
+        selector: selector || null,
+        fields: fields || null,
+        warnings: warnings || []
+      }
+    });
+  } catch {}
+}
+
+function closeRemoteSession(sessionId, reason) {
+  const session = remoteSessions.get(sessionId);
+  if (!session) return;
+  if (session.timer) clearInterval(session.timer);
+  session.timer = null;
+  session.closed = true;
+  session.closeReason = reason || 'closed';
+  if (session.lane === 'vault' && session.vaultSessionId) {
+    vaultClient.send('browserRemoteStop', { sessionId: session.vaultSessionId }).catch(() => {});
+  }
+  for (const ws of session.clients) {
+    try { ws.close(); } catch {}
+  }
+  remoteSessions.delete(sessionId);
+}
+
+function ensureSecureLaneEnabled(res) {
+  if (!SECURE_ALLOWED_DOMAINS.length) {
+    res.json({
+      error: 'Secure lane disabled',
+      message: 'Set SAKAKI_SECURE_ALLOWED_DOMAINS to enable secure browsing',
+      hint: 'Example: SAKAKI_SECURE_ALLOWED_DOMAINS=example.com,login.example.com'
+    });
+    return false;
+  }
+  return true;
+}
+
+function ensureSecurePage(res) {
+  if (!securePage) {
+    res.json({ error: 'No secure page open. Call /secure/navigate first' });
+    return null;
+  }
+  return securePage;
+}
+
+function allowOpaqueUrl(url) {
+  return (
+    url.startsWith('data:') ||
+    url.startsWith('blob:') ||
+    url === 'about:blank'
+  );
+}
+
+function checkSecureRequestUrl(url) {
+  if (allowOpaqueUrl(url)) return { ok: true };
+  return checkSecureUrl(url);
+}
+
+async function createSecurePage() {
+  const page = await browser.newPage();
+  await attachRequestInterception(page, (req) => {
+    const url = req.url();
+    const guard = checkSecureRequestUrl(url);
+    if (!guard.ok) {
+      return req.abort();
+    }
+    return req.continue();
+  }, BROWSER_BACKEND);
+  return page;
+}
 
 app.post('/navigate', async (req, res) => {
   const { url, skipSecurityCheck } = req.body;
@@ -141,7 +1139,7 @@ app.post('/navigate', async (req, res) => {
     // Start resource monitoring
     currentMonitor = await resourceMonitor.monitorPage(currentPage);
 
-    await currentPage.goto(url, { waitUntil: 'networkidle2' });
+    await currentPage.goto(url, { waitUntil: WAIT_UNTIL_NETWORK_IDLE });
 
     // Phishing check after page load
     const phishingCheck = await phishing.checkPhishing(url, currentPage);
@@ -157,6 +1155,15 @@ app.post('/navigate', async (req, res) => {
         phishingScore: phishingCheck.score,
         warnings: phishingCheck.warnings
       });
+    }
+
+    const challenge = await handleChallenge({
+      lane: 'public',
+      page: currentPage,
+      url
+    });
+    if (challenge && challenge.blocked) {
+      return res.json(challenge);
     }
 
     const title = await currentPage.title();
@@ -231,8 +1238,8 @@ app.post('/screenshot', async (req, res) => {
       rateLimiter.pageOpened();
 
       const page = await browser.newPage();
-      await page.goto(url, { waitUntil: 'networkidle2' });
-      const screenshot = await page.screenshot({ encoding: 'base64', path: outputPath });
+      await page.goto(url, { waitUntil: WAIT_UNTIL_NETWORK_IDLE });
+      const screenshot = await screenshotBase64(page, { path: outputPath });
       await page.close();
       rateLimiter.pageClosed();
 
@@ -258,7 +1265,7 @@ app.post('/screenshot', async (req, res) => {
       res.json({ success: true, path: outputPath });
     } else {
       // Return base64
-      const screenshot = await currentPage.screenshot({ encoding: 'base64' });
+      const screenshot = await screenshotBase64(currentPage);
       guardian.logAction('screenshot', {}, 'safe', false);
       res.json({ success: true, screenshot });
     }
@@ -293,6 +1300,19 @@ app.post('/click', async (req, res) => {
 
     if (!clicked) {
       await currentPage.click(selector);
+    }
+
+    try {
+      await currentPage.waitForTimeout(600);
+    } catch {}
+
+    const challenge = await handleChallenge({
+      lane: 'public',
+      page: currentPage,
+      url: currentPage.url()
+    });
+    if (challenge && challenge.blocked) {
+      return res.json(challenge);
     }
 
     guardian.logAction('click', { selector }, 'safe', false);
@@ -339,49 +1359,13 @@ app.post('/type', async (req, res) => {
   }
 });
 
-// Type secret from vault (value never exposed to caller)
-app.post('/type-secret', async (req, res) => {
-  const { selector, secretName } = req.body;
-  if (!selector || !secretName) {
-    return res.json({ error: 'selector and secretName required' });
-  }
-
-  if (!currentPage) {
-    return res.json({ error: 'No page open. Call /navigate first' });
-  }
-
-  try {
-    // Get secret value from vault process (internal only)
-    const secretResult = await vaultClient.send('getForInternal', { name: secretName });
-    if (!secretResult.success) {
-      return res.json({ error: secretResult.error || 'Secret not found or vault not initialized' });
-    }
-
-    // Type the secret
-    let typed = false;
-    try {
-      const found = await semanticFinder.find(currentPage, selector);
-      if (found && found.element) {
-        await found.element.type(secretResult.value);
-        typed = true;
-      }
-    } catch {
-      // Fall back to CSS selector
-    }
-
-    if (!typed) {
-      await currentPage.type(selector, secretResult.value);
-    }
-
-    // Clear secret from memory
-    secretResult.value = null;
-
-    guardian.logAction('type-secret', { selector, secretName }, 'safe', false);
-    res.json({ success: true, selector, secretName });
-  } catch (err) {
-    guardian.logAction('type-secret', { selector, secretName }, 'error', false);
-    res.json({ error: err.message });
-  }
+// Type secret from vault (disabled for safety)
+app.post('/type-secret', (req, res) => {
+  res.status(410).json({
+    error: 'Endpoint disabled',
+    message: '/type-secret has been disabled to avoid exposing secrets outside the Vault process.',
+    hint: 'Use /vault/proxy for API calls or design a vault-side browser control flow.'
+  });
 });
 
 // Form submission (with sensitive data check)
@@ -401,6 +1385,13 @@ app.post('/submit-form', async (req, res) => {
   // Sensitive data check
   const vaultCheck = guardian.beforeFormSubmit(formData, url);
   if (vaultCheck.requiresApproval) {
+    notifyApprovalRequired({
+      lane: 'default',
+      reason: 'Sensitive data detected - requires approval',
+      url,
+      warnings: vaultCheck.warnings,
+      fields: Object.keys(formData || {})
+    });
     return res.json({
       blocked: true,
       reason: 'Sensitive data detected - requires approval',
@@ -411,7 +1402,7 @@ app.post('/submit-form', async (req, res) => {
   try {
     rateLimiter.recordRequest(url);
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
+    await page.goto(url, { waitUntil: WAIT_UNTIL_NETWORK_IDLE });
 
     // Fill form fields
     for (const [field, value] of Object.entries(formData)) {
@@ -421,7 +1412,26 @@ app.post('/submit-form', async (req, res) => {
     // Submit
     if (selector) {
       await page.click(selector);
-      await page.waitForNavigation({ waitUntil: 'networkidle2' });
+      await page.waitForNavigation({ waitUntil: WAIT_UNTIL_NETWORK_IDLE });
+    }
+
+    const challenge = await handleChallenge({
+      lane: 'public',
+      page,
+      url: page.url()
+    });
+    if (challenge && challenge.blocked) {
+      if (currentPage) {
+        try { await currentPage.close(); } catch {}
+        currentPage = null;
+        rateLimiter.pageClosed();
+        if (currentMonitor) currentMonitor.stop();
+        currentMonitor = null;
+      }
+      currentPage = page;
+      currentMonitor = await resourceMonitor.monitorPage(currentPage);
+      rateLimiter.pageOpened();
+      return res.json(challenge);
     }
 
     await page.close();
@@ -433,6 +1443,641 @@ app.post('/submit-form', async (req, res) => {
   } catch (err) {
     res.json({ error: err.message });
   }
+});
+
+// ========== Secure lane (restricted browsing for sensitive workflows) ==========
+app.post('/secure/navigate', async (req, res) => {
+  if (!ensureSecureLaneEnabled(res)) return;
+  const { url } = req.body;
+  if (!url) return res.json({ error: 'url required' });
+
+  const guard = checkSecureUrl(url);
+  if (!guard.ok) {
+    return res.json({ blocked: true, reason: guard.error });
+  }
+
+  const securityCheck = await fullSecurityCheck(url);
+  if (!securityCheck.allowed) {
+    return res.json({
+      blocked: true,
+      reason: 'Security check failed',
+      warnings: securityCheck.warnings,
+      risk: securityCheck.risk,
+      checks: securityCheck.checks
+    });
+  }
+
+  try {
+    if (securePage) {
+      try {
+        await securePage.close();
+        rateLimiter.pageClosed();
+        if (secureMonitor) secureMonitor.stop();
+      } catch {}
+    }
+
+    rateLimiter.recordRequest(url);
+    rateLimiter.pageOpened();
+
+    securePage = await createSecurePage();
+    secureMonitor = await resourceMonitor.monitorPage(securePage);
+
+    await securePage.goto(url, { waitUntil: WAIT_UNTIL_NETWORK_IDLE });
+
+    const phishingCheck = await phishing.checkPhishing(url, securePage);
+    if (phishingCheck.isPhishing) {
+      await securePage.close();
+      securePage = null;
+      rateLimiter.pageClosed();
+      secureMonitor.stop();
+      secureMonitor = null;
+      return res.json({
+        blocked: true,
+        reason: 'Phishing detected after page load',
+        phishingScore: phishingCheck.score,
+        warnings: phishingCheck.warnings
+      });
+    }
+
+    const challenge = await handleChallenge({
+      lane: 'secure',
+      page: securePage,
+      url
+    });
+    if (challenge && challenge.blocked) {
+      return res.json(challenge);
+    }
+
+    const title = await securePage.title();
+    const metrics = secureMonitor.getMetrics();
+
+    const allWarnings = [
+      ...(securityCheck.warnings || []),
+      ...phishingCheck.warnings.map(w => w.message || w)
+    ].filter(Boolean);
+
+    guardian.logAction('secure-navigate', { url }, securityCheck.risk || 'safe', false);
+
+    res.json({
+      success: true,
+      title,
+      url,
+      metrics,
+      phishingScore: phishingCheck.score,
+      risk: securityCheck.risk || 'safe',
+      warnings: allWarnings.length > 0 ? allWarnings : undefined
+    });
+  } catch (err) {
+    if (securePage) {
+      try { await securePage.close(); } catch {}
+      securePage = null;
+    }
+    rateLimiter.pageClosed();
+    res.json({
+      error: err.message,
+      risk: securityCheck.risk || 'unknown',
+      warnings: securityCheck.warnings || []
+    });
+  }
+});
+
+app.post('/secure/close', async (req, res) => {
+  if (securePage) {
+    try {
+      await securePage.close();
+      securePage = null;
+      rateLimiter.pageClosed();
+      if (secureMonitor) {
+        secureMonitor.stop();
+        secureMonitor = null;
+      }
+      res.json({ success: true });
+    } catch (err) {
+      res.json({ error: err.message });
+    }
+  } else {
+    res.json({ success: true, message: 'No secure page open' });
+  }
+});
+
+app.post('/secure/screenshot', async (req, res) => {
+  if (!ensureSecureLaneEnabled(res)) return;
+  const { url, path: outputPath } = req.body;
+
+  if (url) {
+    const guard = checkSecureUrl(url);
+    if (!guard.ok) return res.json({ blocked: true, reason: guard.error });
+
+    try {
+      rateLimiter.recordRequest(url);
+      rateLimiter.pageOpened();
+
+      const page = await createSecurePage();
+      await page.goto(url, { waitUntil: WAIT_UNTIL_NETWORK_IDLE });
+      const screenshot = await screenshotBase64(page, { path: outputPath });
+      await page.close();
+      rateLimiter.pageClosed();
+
+      res.json({ success: true, screenshot: outputPath ? undefined : screenshot, path: outputPath });
+      return;
+    } catch (err) {
+      rateLimiter.pageClosed();
+      res.json({ error: err.message });
+      return;
+    }
+  }
+
+  const page = ensureSecurePage(res);
+  if (!page) return;
+
+  try {
+    if (outputPath) {
+      await page.screenshot({ path: outputPath });
+      guardian.logAction('secure-screenshot', { path: outputPath }, 'safe', false);
+      res.json({ success: true, path: outputPath });
+    } else {
+      const screenshot = await screenshotBase64(page);
+      guardian.logAction('secure-screenshot', {}, 'safe', false);
+      res.json({ success: true, screenshot });
+    }
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post('/secure/click', async (req, res) => {
+  const { selector } = req.body;
+  if (!selector) return res.json({ error: 'selector required' });
+
+  const page = ensureSecurePage(res);
+  if (!page) return;
+
+  const guard = checkSecureRequestUrl(page.url());
+  if (!guard.ok) {
+    return res.json({ blocked: true, reason: guard.error });
+  }
+
+  try {
+    let clicked = false;
+    try {
+      const found = await semanticFinder.find(page, selector);
+      if (found && found.element) {
+        await found.element.click();
+        clicked = true;
+      }
+    } catch {}
+
+    if (!clicked) {
+      await page.click(selector);
+    }
+
+    try {
+      await page.waitForTimeout(600);
+    } catch {}
+
+    const challenge = await handleChallenge({
+      lane: 'secure',
+      page,
+      url: page.url()
+    });
+    if (challenge && challenge.blocked) {
+      return res.json(challenge);
+    }
+
+    guardian.logAction('secure-click', { selector }, 'safe', false);
+    res.json({ success: true, selector });
+  } catch (err) {
+    guardian.logAction('secure-click', { selector }, 'error', false);
+    res.json({ error: err.message });
+  }
+});
+
+app.post('/secure/type', async (req, res) => {
+  const { selector, text } = req.body;
+  if (!selector || text === undefined) {
+    return res.json({ error: 'selector and text required' });
+  }
+
+  if (!SECURE_ALLOW_SENSITIVE) {
+    const warnings = detectSensitiveData(text);
+    if (warnings.length > 0) {
+      notifyApprovalRequired({
+        lane: 'secure',
+        reason: 'Sensitive input blocked in secure lane',
+        warnings,
+        selector
+      });
+      return res.json({
+        blocked: true,
+        reason: 'Sensitive input blocked in secure lane',
+        warnings
+      });
+    }
+  }
+
+  const page = ensureSecurePage(res);
+  if (!page) return;
+
+  const guard = checkSecureRequestUrl(page.url());
+  if (!guard.ok) {
+    return res.json({ blocked: true, reason: guard.error });
+  }
+
+  try {
+    let typed = false;
+    try {
+      const found = await semanticFinder.find(page, selector);
+      if (found && found.element) {
+        await found.element.type(text);
+        typed = true;
+      }
+    } catch {}
+
+    if (!typed) {
+      await page.type(selector, text);
+    }
+
+    guardian.logAction('secure-type', { selector, length: text.length }, 'safe', false);
+    res.json({ success: true, selector });
+  } catch (err) {
+    guardian.logAction('secure-type', { selector }, 'error', false);
+    res.json({ error: err.message });
+  }
+});
+
+app.post('/secure/submit-form', async (req, res) => {
+  if (!ensureSecureLaneEnabled(res)) return;
+  const { url, formData, selector } = req.body;
+  if (!url || !formData) return res.json({ error: 'url and formData required' });
+
+  const guard = checkSecureUrl(url);
+  if (!guard.ok) return res.json({ blocked: true, reason: guard.error });
+
+  const secCheck = await fullSecurityCheck(url);
+  if (!secCheck.allowed) {
+    return res.json({
+      blocked: true,
+      reason: 'Security check failed',
+      warnings: secCheck.warnings
+    });
+  }
+
+  const vaultCheck = guardian.beforeFormSubmit(formData, url);
+  if (vaultCheck.requiresApproval && !SECURE_ALLOW_SENSITIVE) {
+    notifyApprovalRequired({
+      lane: 'secure',
+      reason: 'Sensitive data detected - secure lane blocks this by default',
+      url,
+      warnings: vaultCheck.warnings,
+      fields: Object.keys(formData || {})
+    });
+    return res.json({
+      blocked: true,
+      reason: 'Sensitive data detected - secure lane blocks this by default',
+      warnings: vaultCheck.warnings
+    });
+  }
+
+  try {
+    rateLimiter.recordRequest(url);
+    rateLimiter.pageOpened();
+
+    const page = await createSecurePage();
+    await page.goto(url, { waitUntil: WAIT_UNTIL_NETWORK_IDLE });
+
+    for (const [field, value] of Object.entries(formData)) {
+      await page.type(`[name="${field}"]`, value);
+    }
+
+    if (selector) {
+      await page.click(selector);
+      await page.waitForNavigation({ waitUntil: WAIT_UNTIL_NETWORK_IDLE });
+    }
+
+    const challenge = await handleChallenge({
+      lane: 'secure',
+      page,
+      url: page.url()
+    });
+    if (challenge && challenge.blocked) {
+      if (securePage) {
+        try { await securePage.close(); } catch {}
+        securePage = null;
+        rateLimiter.pageClosed();
+      if (secureMonitor) secureMonitor.stop();
+        secureMonitor = null;
+      }
+      securePage = page;
+      secureMonitor = await resourceMonitor.monitorPage(securePage);
+      return res.json(challenge);
+    }
+
+    await page.close();
+    rateLimiter.pageClosed();
+
+    res.json({ success: true, warnings: vaultCheck.warnings });
+  } catch (err) {
+    rateLimiter.pageClosed();
+    res.json({ error: err.message });
+  }
+});
+
+// ========== Remote View ==========
+app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (req, res) => {
+  const {
+    lane = 'secure',
+    fps = REMOTE_VIEW_DEFAULT_FPS,
+    quality = REMOTE_VIEW_DEFAULT_QUALITY,
+    allowInput = false,
+    allowText = REMOTE_VIEW_ALLOW_TEXT,
+    allowScroll = REMOTE_VIEW_ALLOW_SCROLL,
+    startUrl,
+    allowedDomains,
+    allowSubdomains,
+    allowHttp,
+    allowPrivate
+  } = req.body || {};
+
+  if (remoteSessions.size >= REMOTE_VIEW_MAX_SESSIONS) {
+    return res.status(429).json({ error: 'Too many remote sessions' });
+  }
+
+  let page = null;
+  let vaultSessionId = null;
+  let lastSize = { width: 0, height: 0 };
+
+  if (lane === 'vault') {
+    if (!vaultInitialized) {
+      return res.json({ error: 'Vault not initialized. Call /vault/init first' });
+    }
+    const effectiveAllowed = Array.isArray(allowedDomains) && allowedDomains.length
+      ? allowedDomains
+      : SECURE_ALLOWED_DOMAINS;
+    if (!effectiveAllowed.length) {
+      return res.json({
+        error: 'allowedDomains required',
+        hint: 'Set SAKAKI_SECURE_ALLOWED_DOMAINS or pass allowedDomains'
+      });
+    }
+    if (startUrl) {
+      const guard = checkAllowedUrl(
+        startUrl,
+        effectiveAllowed.map(s => s.toLowerCase()),
+        !!allowSubdomains || SECURE_ALLOW_SUBDOMAINS,
+        !!allowHttp || SECURE_ALLOW_HTTP
+      );
+      if (!guard.ok) {
+        return res.json({ blocked: true, reason: guard.error });
+      }
+    }
+    try {
+      const vaultStart = await vaultClient.send('browserRemoteStart', {
+        startUrl,
+        allowedDomains: effectiveAllowed,
+        allowSubdomains: !!allowSubdomains || SECURE_ALLOW_SUBDOMAINS,
+        allowHttp: !!allowHttp || SECURE_ALLOW_HTTP,
+        allowPrivate: !!allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE,
+        allowInput: !!allowInput,
+        allowText: !!allowText,
+        allowScroll: !!allowScroll
+      });
+      if (!vaultStart.success) {
+        return res.json(vaultStart);
+      }
+      vaultSessionId = vaultStart.sessionId;
+      lastSize = vaultStart.size || lastSize;
+    } catch (e) {
+      return res.json({ success: false, error: e.message });
+    }
+  } else {
+    page = getLanePage(lane);
+    if (!page) {
+      return res.json({ error: `No ${lane} page open` });
+    }
+  }
+
+  const started = startRemoteSession({
+    lane,
+    page,
+    vaultSessionId,
+    lastSize,
+    allowInput,
+    allowText,
+    allowScroll,
+    fps,
+    quality
+  });
+
+  if (!started.success) {
+    const status = started.error === 'Too many remote sessions' ? 429 : 400;
+    return res.status(status).json(started);
+  }
+
+  res.json(started);
+});
+
+app.post('/remote/stop', requireVaultAdmin, requireRemoteViewEnabled, async (req, res) => {
+  const { sessionId } = req.body || {};
+  if (!sessionId) return res.json({ error: 'sessionId required' });
+  closeRemoteSession(sessionId, 'stopped');
+  res.json({ success: true });
+});
+
+app.get('/remote/view/:id', requireRemoteViewEnabled, (req, res) => {
+  const session = remoteSessions.get(req.params.id);
+  if (!session) return res.status(404).send('Not found');
+  const token = req.query.token;
+  if (!token || token !== session.token) {
+    if (!isAdminRequest(req)) {
+      return res.status(403).send('Forbidden');
+    }
+  }
+
+  const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sakaki Remote View</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin:0; background:#111; color:#fff; font-family: -apple-system, system-ui, sans-serif; }
+      #wrap { display:flex; flex-direction:column; height:100vh; }
+      #top { padding:8px 12px; font-size:12px; background:#181818; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+      #meta { display:flex; gap:6px; flex-wrap:wrap; }
+      .badge { padding:2px 6px; border-radius:999px; background:#222; color:#bbb; font-size:11px; }
+      .badge.on { background:#1f3f2a; color:#9ae6b4; }
+      .badge.warn { background:#3f2a1f; color:#f6ad55; }
+      #canvas { flex:1; width:100%; height:100%; touch-action: none; }
+      #status { opacity:0.7; }
+      #overlay { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); color:#fff; font-size:16px; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <div id="top">
+        Sakaki Remote View <span id="status">connecting...</span>
+        <div id="meta">
+          <span id="laneBadge" class="badge">lane: ${session.lane}</span>
+          <span id="inputBadge" class="badge">input: off</span>
+          <span id="textBadge" class="badge">text: off</span>
+          <span id="scrollBadge" class="badge">scroll: off</span>
+        </div>
+      </div>
+      <canvas id="canvas"></canvas>
+    </div>
+    <div id="overlay">Session closed</div>
+    <script>
+      const sessionId = ${JSON.stringify(session.id)};
+      const token = ${JSON.stringify(session.token)};
+      const wsUrl = ((location.protocol === 'https:') ? 'wss://' : 'ws://') + location.host + '/remote/ws?session=' + sessionId + '&token=' + token;
+      const ws = new WebSocket(wsUrl);
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const status = document.getElementById('status');
+      const overlay = document.getElementById('overlay');
+      const laneBadge = document.getElementById('laneBadge');
+      const inputBadge = document.getElementById('inputBadge');
+      const textBadge = document.getElementById('textBadge');
+      const scrollBadge = document.getElementById('scrollBadge');
+      const encoder = new TextEncoder();
+      const tokenBytes = Uint8Array.from(token.match(/.{2}/g).map(b => parseInt(b, 16)));
+      const hmacKeyPromise = crypto.subtle.importKey(
+        'raw',
+        tokenBytes,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign', 'verify']
+      );
+      let lastSize = { width: 0, height: 0 };
+      let lastCounter = 0;
+      let cmdCounter = 0;
+      let allowInput = ${session.allowInput ? 'true' : 'false'};
+      let allowText = ${session.allowText ? 'true' : 'false'};
+      let allowScroll = ${session.allowScroll ? 'true' : 'false'};
+
+      async function hmacHexBytes(bytes) {
+        const key = await hmacKeyPromise;
+        const sig = await crypto.subtle.sign('HMAC', key, bytes);
+        return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+
+      function payloadString(counter, ts, cmd, x, y, deltaY, key, text) {
+        return [counter, ts, cmd || '', x ?? '', y ?? '', deltaY ?? '', key ?? '', text ?? ''].join('|');
+      }
+
+      function resizeCanvas(w, h) {
+        canvas.width = w;
+        canvas.height = h;
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+      }
+
+      function setBadge(el, enabled) {
+        el.classList.toggle('on', !!enabled);
+        el.classList.toggle('warn', !enabled);
+      }
+
+      function updateBadges() {
+        setBadge(inputBadge, allowInput);
+        setBadge(textBadge, allowText);
+        setBadge(scrollBadge, allowScroll);
+        inputBadge.textContent = 'input: ' + (allowInput ? 'on' : 'off');
+        textBadge.textContent = 'text: ' + (allowText ? 'on' : 'off');
+        scrollBadge.textContent = 'scroll: ' + (allowScroll ? 'on' : 'off');
+      }
+
+      ws.onopen = () => {
+        status.textContent = 'connected';
+        overlay.style.display = 'none';
+      };
+      ws.onclose = () => {
+        status.textContent = 'closed';
+        overlay.style.display = 'flex';
+      };
+      ws.onerror = () => {
+        status.textContent = 'error';
+      };
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'hello') {
+          allowInput = !!msg.allowInput;
+          allowText = !!msg.allowText;
+          allowScroll = !!msg.allowScroll;
+          updateBadges();
+          return;
+        }
+        if (msg.type !== 'frame') return;
+        lastCounter = msg.counter;
+        if (msg.width && msg.height && (msg.width !== lastSize.width || msg.height !== lastSize.height)) {
+          lastSize = { width: msg.width, height: msg.height };
+          resizeCanvas(msg.width, msg.height);
+        }
+        const binary = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+        const header = encoder.encode(String(msg.counter) + '|' + String(msg.ts) + '|');
+        const payload = new Uint8Array(header.length + binary.length);
+        payload.set(header, 0);
+        payload.set(binary, header.length);
+        hmacHexBytes(payload).then((sig) => {
+          if (sig !== msg.sig) return;
+          const img = new Image();
+          img.onload = () => {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          };
+          img.src = 'data:image/jpeg;base64,' + msg.data;
+        }).catch(() => {});
+      };
+
+      async function sendCommand(payload) {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const ts = Date.now();
+        const counter = ++cmdCounter;
+        const p = payloadString(
+          counter,
+          ts,
+          payload.cmd,
+          payload.x,
+          payload.y,
+          payload.deltaY,
+          payload.key,
+          payload.text
+        );
+        const sig = await hmacHexBytes(encoder.encode(p));
+        ws.send(JSON.stringify({ type: 'cmd', ts, counter, sig, ...payload }));
+      }
+
+      function positionToRatio(ev) {
+        const rect = canvas.getBoundingClientRect();
+        const x = (ev.clientX - rect.left) / rect.width;
+        const y = (ev.clientY - rect.top) / rect.height;
+        return { x: Math.min(Math.max(x, 0), 1), y: Math.min(Math.max(y, 0), 1) };
+      }
+
+      canvas.addEventListener('click', (ev) => {
+        if (!allowInput) return;
+        const { x, y } = positionToRatio(ev);
+        sendCommand({ cmd: 'click', x, y });
+      });
+
+      canvas.addEventListener('wheel', (ev) => {
+        if (!allowInput || !allowScroll) return;
+        sendCommand({ cmd: 'scroll', deltaY: ev.deltaY });
+      });
+
+      window.addEventListener('keydown', (ev) => {
+        if (!allowInput || !allowText) return;
+        if (ev.key.length === 1 || ev.key === 'Enter' || ev.key === 'Backspace') {
+          sendCommand({ cmd: 'key', key: ev.key });
+        }
+      });
+
+      updateBadges();
+    </script>
+  </body>
+</html>`;
+
+  res.type('html').send(html);
 });
 
 // Phishing check API
@@ -607,6 +2252,50 @@ app.post('/vault/proxy', async (req, res) => {
   res.json(result);
 });
 
+// Vault Browser: Execute actions inside Vault process
+app.post('/vault/browser/execute', async (req, res) => {
+  if (!vaultInitialized) {
+    return res.json({ error: 'Vault not initialized' });
+  }
+
+  const {
+    actions,
+    allowedDomains,
+    allowSubdomains,
+    allowHttp,
+    allowPrivate,
+    allowSensitive,
+    timeout
+  } = req.body || {};
+
+  const effectiveAllowedDomains = Array.isArray(allowedDomains) && allowedDomains.length
+    ? allowedDomains
+    : SECURE_ALLOWED_DOMAINS;
+
+  if (!effectiveAllowedDomains.length) {
+    return res.json({
+      error: 'allowedDomains required',
+      hint: 'Set SAKAKI_SECURE_ALLOWED_DOMAINS or pass allowedDomains in the request'
+    });
+  }
+
+  const check = validateBrowserActions(actions, allowSensitive || VAULT_BROWSER_ALLOW_SENSITIVE);
+  if (!check.ok) {
+    return res.json(check);
+  }
+
+  const result = await vaultClient.browserExecute({
+    actions,
+    allowedDomains: effectiveAllowedDomains,
+    allowSubdomains: !!allowSubdomains || SECURE_ALLOW_SUBDOMAINS,
+    allowHttp: !!allowHttp || SECURE_ALLOW_HTTP,
+    allowPrivate: !!allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE,
+    timeout
+  });
+
+  res.json(result);
+});
+
 // Signing key info (for external service integration)
 app.get('/vault/proxy/signing-key', async (req, res) => {
   if (!vaultInitialized) {
@@ -619,11 +2308,11 @@ app.get('/vault/proxy/signing-key', async (req, res) => {
 // ========== External services: Vault-only mode enforcement ==========
 
 // enforceVaultProxy setting (used by external services)
-app.get('/service/vault-enforcement', (req, res) => {
+app.get('/service/vault-enforcement', requireVaultAdmin, (req, res) => {
   res.json(vaultEnforcement.getConfig());
 });
 
-app.post('/service/vault-enforcement', (req, res) => {
+app.post('/service/vault-enforcement', requireVaultAdmin, (req, res) => {
   const { enforceVaultProxy } = req.body;
   if (typeof enforceVaultProxy === 'boolean') {
     vaultEnforcement.setEnforceVaultProxy(enforceVaultProxy);
@@ -694,7 +2383,7 @@ app.post('/zkp/register', (req, res) => {
 });
 
 // ZKP: Register API key via Vault
-app.post('/zkp/register-from-vault', async (req, res) => {
+app.post('/zkp/register-from-vault', requireVaultAdmin, async (req, res) => {
   const { keyId, vaultSecretName, metadata } = req.body;
   if (!keyId || !vaultSecretName) {
     return res.json({ error: 'keyId and vaultSecretName required' });
@@ -730,7 +2419,7 @@ app.post('/zkp/verify', (req, res) => {
 });
 
 // ZKP: Vault verification (verify directly with value)
-app.post('/zkp/verify-with-vault', async (req, res) => {
+app.post('/zkp/verify-with-vault', requireVaultAdmin, async (req, res) => {
   const { keyId, value } = req.body;
   if (!keyId || !value) {
     return res.json({ error: 'keyId and value required' });
@@ -919,6 +2608,8 @@ app.get('/dashboard', (req, res) => {
   const guardianStats = guardian.getStats();
   const rateStats = rateLimiter.getStats();
   const resourceStats = resourceMonitor.getStats();
+  const notifyStats = notificationCenter.getStats();
+  const notifications = notificationCenter.list(10);
 
   res.send(`
 <!DOCTYPE html>
@@ -934,6 +2625,12 @@ app.get('/dashboard', (req, res) => {
     .danger { color: #f00; }
     h1 { color: #e94560; }
     h2 { color: #0f3460; background: #e94560; padding: 5px 10px; display: inline-block; }
+    .notif { padding: 8px 10px; border-bottom: 1px solid #1f2a4a; }
+    .notif:last-child { border-bottom: none; }
+    .notif .meta { font-size: 11px; opacity: 0.7; }
+    .notif.warn { color: #ff0; }
+    .notif.error { color: #f00; }
+    .notif.info { color: #9ad; }
   </style>
 </head>
 <body>
@@ -979,10 +2676,71 @@ app.get('/dashboard', (req, res) => {
     </div>
   </div>
 
+  <div class="card">
+    <h2>Notifications</h2>
+    <div class="stat">
+      <div class="value">${notifyStats.total}</div>
+      <div>Total Events</div>
+    </div>
+    <div class="stat">
+      <div class="value">${notifyStats.webhooks}</div>
+      <div>Webhooks</div>
+    </div>
+    <div class="stat">
+      <div class="value ${notifyStats.emailConfigured ? '' : 'warn'}">${notifyStats.emailConfigured ? 'ON' : 'OFF'}</div>
+      <div>Email</div>
+    </div>
+    <div style="margin-top: 10px; font-size: 12px;">
+      ${notifications.length === 0 ? '<div class="notif info">No notifications</div>' : notifications.map(n => `
+        <div class="notif ${n.severity}">
+          <div><strong>${n.type}</strong> - ${n.message}</div>
+          <div class="meta">${new Date(n.createdAt).toLocaleString()}</div>
+        </div>
+      `).join('')}
+    </div>
+  </div>
+
   <script>setTimeout(() => location.reload(), 5000);</script>
 </body>
 </html>
   `);
+});
+
+// Notifications API (admin only for non-local access)
+app.get('/notify/events', requireVaultAdmin, (req, res) => {
+  const limit = parseInt(req.query.limit || '50', 10);
+  res.json({ events: notificationCenter.list(limit) });
+});
+
+app.get('/notify/stats', requireVaultAdmin, (req, res) => {
+  res.json(notificationCenter.getStats());
+});
+
+app.post('/notify/test', requireVaultAdmin, (req, res) => {
+  const { type, message, severity, data } = req.body || {};
+  const event = notificationCenter.notify({
+    type: type || 'test_event',
+    severity: severity || 'info',
+    message: message || 'Test notification',
+    data: data || { source: 'manual' }
+  });
+  res.json({ success: true, event });
+});
+
+app.get('/notify/webhooks', requireVaultAdmin, (req, res) => {
+  res.json({ webhooks: notificationCenter.webhooks.slice() });
+});
+
+app.post('/notify/webhooks', requireVaultAdmin, (req, res) => {
+  const { url } = req.body || {};
+  const result = notificationCenter.registerWebhook(url);
+  res.json(result);
+});
+
+app.delete('/notify/webhooks', requireVaultAdmin, (req, res) => {
+  const { url } = req.body || {};
+  const result = notificationCenter.unregisterWebhook(url);
+  res.json(result);
 });
 
 // Vault UI
@@ -1048,10 +2806,10 @@ app.get('/vault', async (req, res) => {
   <div class="card">
     <h2>Security Features</h2>
     <div class="features">
-      <div class="feature"><span class="icon">🚫</span> No retrieve() - ZKP only</div>
+      <div class="feature"><span class="icon">🚫</span> No public retrieve() API (Vault-only verification)</div>
       <div class="feature"><span class="icon">🔒</span> Separate process isolation</div>
       <div class="feature"><span class="icon">🧹</span> SecureBuffer auto-wipe</div>
-      <div class="feature"><span class="icon">💣</span> Self-destruct on attack</div>
+      <div class="feature"><span class="icon">🛡️</span> Auto-lock on tamper</div>
       <div class="feature"><span class="icon">📝</span> Full audit logging</div>
       <div class="feature"><span class="icon">💾</span> Encrypted persistence</div>
     </div>
@@ -1491,9 +3249,160 @@ async function main() {
   resourceMonitor.startMonitoring(5000);
   console.log('[Sakaki-Browser] Security modules initialized');
 
+  if (!ADMIN_TOKEN && !ALLOW_INSECURE_VAULT) {
+    console.warn('[Sakaki-Browser] SAKAKI_ADMIN_TOKEN not set. Vault endpoints are limited to local requests.');
+  }
+  if (!SECURE_ALLOWED_DOMAINS.length) {
+    console.warn('[Sakaki-Browser] Secure lane disabled (SAKAKI_SECURE_ALLOWED_DOMAINS not set).');
+  }
+
   await initBrowser();
-  app.listen(PORT, () => {
-    console.log(`[Sakaki-Browser] Listening on port ${PORT}`);
+
+  const server = http.createServer(app);
+  const wss = new WebSocket.Server({ server, path: '/remote/ws' });
+
+  wss.on('connection', (ws, req) => {
+    try {
+      const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+      const sessionId = url.searchParams.get('session');
+      const token = url.searchParams.get('token');
+
+      if (!sessionId || !token) {
+        ws.close();
+        return;
+      }
+
+      const session = remoteSessions.get(sessionId);
+      if (!session || session.token !== token) {
+        ws.close();
+        return;
+      }
+
+      session.clients.add(ws);
+      session.lastFrameHash = null; // force next frame push
+      touchRemoteSession(session);
+
+      ws.send(JSON.stringify({
+        type: 'hello',
+        allowInput: session.allowInput,
+        allowText: session.allowText,
+        allowScroll: session.allowScroll,
+        expiresAt: session.expiresAt
+      }));
+
+      ws.on('message', async (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (!msg || msg.type !== 'cmd') return;
+          if (!session.allowInput) return;
+
+          const counter = Number(msg.counter);
+          const ts = Number(msg.ts || Date.now());
+          if (!Number.isFinite(counter) || counter <= session.lastCommandCounter) return;
+          if (Math.abs(Date.now() - ts) > 120000) return;
+
+          const payload = [
+            counter,
+            ts,
+            msg.cmd || '',
+            msg.x ?? '',
+            msg.y ?? '',
+            msg.deltaY ?? '',
+            msg.key ?? '',
+            msg.text ?? ''
+          ].join('|');
+
+          if (!verifyRemotePayload(session.key, payload, msg.sig || '')) {
+            return;
+          }
+
+          session.lastCommandCounter = counter;
+          touchRemoteSession(session);
+
+          if (session.lane === 'vault') {
+            if (!session.vaultSessionId) return;
+            await vaultClient.send('browserRemoteCommand', {
+              sessionId: session.vaultSessionId,
+              cmd: msg.cmd,
+              x: msg.x,
+              y: msg.y,
+              deltaY: msg.deltaY,
+              key: msg.key,
+              text: msg.text
+            });
+            const now = Date.now();
+            if (now - (session.lastChallengeCheckAt || 0) > 1000) {
+              session.lastChallengeCheckAt = now;
+              try {
+                const chk = await vaultClient.send('browserRemoteChallenge', {
+                  sessionId: session.vaultSessionId
+                });
+                await handleVaultChallengeResult(session, chk, 'vault');
+              } catch {}
+            }
+            return;
+          }
+
+          const page = session.page;
+          if (!page || page.isClosed()) {
+            closeRemoteSession(session.id, 'page_closed');
+            return;
+          }
+
+          const size = session.lastSize || await getViewportSize(page);
+          const width = size.width || 1;
+          const height = size.height || 1;
+
+          if (msg.cmd === 'click') {
+            const x = Math.max(0, Math.min(1, Number(msg.x)));
+            const y = Math.max(0, Math.min(1, Number(msg.y)));
+            await page.mouse.click(x * width, y * height);
+            await maybeCheckChallengeForPage(session, page, session.lane === 'secure' ? 'secure' : 'public');
+            return;
+          }
+
+          if (msg.cmd === 'scroll' && session.allowScroll) {
+            const deltaY = Number(msg.deltaY) || 0;
+            await page.mouse.wheel({ deltaY });
+            await maybeCheckChallengeForPage(session, page, session.lane === 'secure' ? 'secure' : 'public');
+            return;
+          }
+
+          if (msg.cmd === 'key' && session.allowText) {
+            const key = String(msg.key || '');
+            if (key.length === 0) return;
+            if (REMOTE_VIEW_BLOCK_SENSITIVE) {
+              const warnings = detectSensitiveData(key);
+              if (warnings.length > 0) return;
+            }
+            await page.keyboard.press(key === 'Backspace' ? 'Backspace' : key);
+            await maybeCheckChallengeForPage(session, page, session.lane === 'secure' ? 'secure' : 'public');
+            return;
+          }
+
+          if (msg.cmd === 'type' && session.allowText) {
+            const text = String(msg.text || '');
+            const safe = sanitizeRemoteText(text);
+            if (!safe.ok) return;
+            await page.keyboard.type(text);
+            await maybeCheckChallengeForPage(session, page, session.lane === 'secure' ? 'secure' : 'public');
+            return;
+          }
+        } catch {
+          // Ignore malformed commands
+        }
+      });
+
+      ws.on('close', () => {
+        session.clients.delete(ws);
+      });
+    } catch {
+      ws.close();
+    }
+  });
+
+  server.listen(PORT, BIND, () => {
+    console.log(`[Sakaki-Browser] Listening on ${BIND}:${PORT}`);
     console.log(`[Sakaki-Browser] Dashboard: http://localhost:${PORT}/dashboard`);
     console.log('[Sakaki-Browser] Guardian + Phishing + RateLimiter + ResourceMonitor active');
   });
