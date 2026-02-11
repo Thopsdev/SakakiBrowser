@@ -8,7 +8,7 @@ const { ZKPClient } = require('../src/plugins/zkp-provider');
 
 // シミュレーション用
 async function simulateAuth() {
-  const API_KEY = 'sk-super-secret-key-12345';
+  const API_KEY = 'demo-key-12345';
   const KEY_ID = 'user-123';
 
   // クライアント初期化 (キーのハッシュのみ保持)
@@ -48,7 +48,7 @@ async function simulateAuth() {
   console.log('=== Key Benefits ===');
   console.log('- API key NEVER transmitted over network');
   console.log('- Server only stores hash, not actual key');
-  console.log('- Challenge-response prevents replay attacks');
+  console.log('- Challenge-response prevents replay attempts');
   console.log('- Even if traffic is intercepted, key is safe');
 }
 
