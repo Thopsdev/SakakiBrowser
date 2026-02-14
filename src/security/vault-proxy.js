@@ -40,7 +40,8 @@ class VaultProxy {
    * External services can verify this signature to confirm request came through Vault
    */
   signRequest(method, url, timestamp, body = '') {
-    const payload = `${method}\n${url}\n${timestamp}\n${body}`;
+    const methodUpper = String(method || 'GET').toUpperCase();
+    const payload = `${methodUpper}\n${url}\n${timestamp}\n${body}`;
     const signature = crypto
       .createHmac('sha256', this.signingKey)
       .update(payload)
@@ -259,8 +260,13 @@ function createVaultVerificationMiddleware(options = {}) {
 
     // Signature verification
     const body = JSON.stringify(req.body) || '';
-    const url = req.originalUrl || req.url;
-    const payload = `${req.method}\n${url}\n${timestamp}\n${body}`;
+    const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const forwardedHost = (req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const proto = forwardedProto || req.protocol || 'https';
+    const host = forwardedHost || req.get('host') || '';
+    const path = req.originalUrl || req.url;
+    const fullUrl = host ? `${proto}://${host}${path}` : path;
+    const payload = `${req.method}\n${fullUrl}\n${timestamp}\n${body}`;
 
     const expectedSignature = crypto
       .createHmac('sha256', signingKey)

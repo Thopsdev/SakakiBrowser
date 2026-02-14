@@ -50,16 +50,17 @@ const VAULT_ONLY_MODE = process.env.SAKAKI_VAULT_ONLY === '1'
   || MODE === 'vault_only'
   || MODE === 'vault-only'
   || MODE === 'vaultonly';
+const STRICT_MODE = VAULT_ONLY_MODE;
 const SECURE_ALLOWED_DOMAINS = (process.env.SAKAKI_SECURE_ALLOWED_DOMAINS || '')
   .split(',')
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
 const SECURE_ALLOW_SUBDOMAINS = process.env.SAKAKI_SECURE_ALLOW_SUBDOMAINS === '1';
-const SECURE_ALLOW_HTTP = process.env.SAKAKI_SECURE_ALLOW_HTTP === '1';
-const SECURE_ALLOW_SENSITIVE = process.env.SAKAKI_SECURE_ALLOW_SENSITIVE === '1';
-const SECURE_ALLOW_PRIVATE = process.env.SAKAKI_SECURE_ALLOW_PRIVATE === '1';
-const VAULT_BROWSER_ALLOW_PRIVATE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
-const VAULT_BROWSER_ALLOW_SENSITIVE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE === '1';
+const SECURE_ALLOW_HTTP = !STRICT_MODE && process.env.SAKAKI_SECURE_ALLOW_HTTP === '1';
+const SECURE_ALLOW_SENSITIVE = !STRICT_MODE && process.env.SAKAKI_SECURE_ALLOW_SENSITIVE === '1';
+const SECURE_ALLOW_PRIVATE = !STRICT_MODE && process.env.SAKAKI_SECURE_ALLOW_PRIVATE === '1';
+const VAULT_BROWSER_ALLOW_PRIVATE = !STRICT_MODE && process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
+const VAULT_BROWSER_ALLOW_SENSITIVE = !STRICT_MODE && process.env.SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE === '1';
 const VAULT_BROWSER_MAX_ACTIONS = parseInt(
   process.env.SAKAKI_VAULT_BROWSER_MAX_ACTIONS || '50',
   10
@@ -2356,17 +2357,23 @@ app.post('/vault/browser/execute', async (req, res) => {
     });
   }
 
-  const check = validateBrowserActions(actions, allowSensitive || VAULT_BROWSER_ALLOW_SENSITIVE);
+  const allowSensitiveInput = STRICT_MODE
+    ? false
+    : (allowSensitive || VAULT_BROWSER_ALLOW_SENSITIVE);
+  const check = validateBrowserActions(actions, allowSensitiveInput);
   if (!check.ok) {
     return res.json(check);
   }
+
+  const allowHttpFinal = STRICT_MODE ? false : (!!allowHttp || SECURE_ALLOW_HTTP);
+  const allowPrivateFinal = STRICT_MODE ? false : (!!allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE);
 
   const result = await vaultClient.browserExecute({
     actions,
     allowedDomains: effectiveAllowedDomains,
     allowSubdomains: !!allowSubdomains || SECURE_ALLOW_SUBDOMAINS,
-    allowHttp: !!allowHttp || SECURE_ALLOW_HTTP,
-    allowPrivate: !!allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE,
+    allowHttp: allowHttpFinal,
+    allowPrivate: allowPrivateFinal,
     timeout
   });
 

@@ -8,7 +8,13 @@ const antivirus = require('./antivirus');
 const vault = require('./vault');
 const threatIntel = require('./threat-intel');
 
-const PUBLIC_ALLOW_HTTP = process.env.SAKAKI_PUBLIC_ALLOW_HTTP === '1';
+const MODE = String(process.env.SAKAKI_MODE || '').toLowerCase().trim();
+const VAULT_ONLY_MODE = process.env.SAKAKI_VAULT_ONLY === '1'
+  || MODE === 'strict'
+  || MODE === 'vault_only'
+  || MODE === 'vault-only'
+  || MODE === 'vaultonly';
+const PUBLIC_ALLOW_HTTP = !VAULT_ONLY_MODE && process.env.SAKAKI_PUBLIC_ALLOW_HTTP === '1';
 const SUPPRESS_HTTP_WARN = process.env.SAKAKI_SUPPRESS_HTTP_WARN === '1';
 
 // Operation log
