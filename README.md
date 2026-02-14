@@ -684,14 +684,14 @@ flowchart TB
   subgraph SB["Sakaki Browser"]
     direction TB
 
-    subgraph R1[""]
+    subgraph Core["Core"]
       direction LR
       BP["Browser Pool"]
       G["Guardian<br/>(audit + policy)"]
       AV["Antivirus<br/>Scanner"]
     end
 
-    subgraph R2[""]
+    subgraph Integrations["Integrations"]
       direction LR
       SF["Semantic Finder"]
       WS["WebSocket Proxy"]
@@ -707,8 +707,8 @@ flowchart TB
     • Vault-signed requests (HMAC)<br/>
     • BLAKE3 + SecureBuffer (auto-zeroing)"]
 
-    R1 --> IPC
-    R2 --> IPC
+    Core --> IPC
+    Integrations --> IPC
     IPC --> VP
   end
 ```
