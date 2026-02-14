@@ -3,6 +3,7 @@ const { createSafeA2A } = require('../src');
 const { canonicalizeEnvelope, computePayloadHash } = require('../src/middleware/crypto');
 
 const SHARED_SECRET = 'dev-secret-change-me';
+const HASH_ALG = (process.env.SAKAKI_A2A_HASH_ALG || 'sha256').toLowerCase();
 
 function signEnvelope(env) {
   const payload = canonicalizeEnvelope(env);
@@ -31,10 +32,13 @@ const envelope = {
   trace_id: 'trc_quickstart',
   purpose: 'research.compile_brief',
   classification: 'PUBLIC',
-  payload_hash: computePayloadHash(payload),
+  payload_hash: computePayloadHash(payload, HASH_ALG),
   sig: { alg: 'hmac-sha256', kid: 'local:test', value: '' },
   constraints: { allowed_domains: ['example.com'], allowed_tools: ['http_fetch'] }
 };
+if (!envelope.payload_hash) {
+  throw new Error(`Unsupported hash algorithm: ${HASH_ALG}`);
+}
 envelope.sig.value = signEnvelope(envelope);
 
 (async () => {

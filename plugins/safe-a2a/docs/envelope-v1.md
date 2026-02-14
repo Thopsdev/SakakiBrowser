@@ -19,9 +19,9 @@ Required Fields
 - sig
 
 Payload Hash
-- `payload_hash` is `sha256` of the payload
+- `payload_hash` is `sha256` or `blake3` of the payload
 - For objects, hash canonical JSON with sorted keys
-- Format: `sha256:<hex>`
+- Format: `sha256:<hex>` or `blake3:<hex>`
 
 Recommended Fields
 - data_tags

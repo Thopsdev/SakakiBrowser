@@ -4,6 +4,7 @@ const { canonicalizeEnvelope, computePayloadHash } = require('../src/middleware/
 const SERVER = process.env.SAKAKI_URL || 'http://127.0.0.1:18800';
 const SHARED_SECRET = process.env.SAKAKI_A2A_SHARED_SECRET || 'change-me';
 const TARGET_URL = process.env.SAKAKI_TARGET_URL || 'https://example.com';
+const HASH_ALG = (process.env.SAKAKI_A2A_HASH_ALG || 'sha256').toLowerCase();
 
 function signEnvelope(env) {
   const payload = canonicalizeEnvelope(env);
@@ -12,7 +13,10 @@ function signEnvelope(env) {
 
 async function main() {
   const payload = { url: TARGET_URL };
-  const payloadHash = computePayloadHash(payload);
+  const payloadHash = computePayloadHash(payload, HASH_ALG);
+  if (!payloadHash) {
+    throw new Error(`Unsupported hash algorithm: ${HASH_ALG}`);
+  }
 
   const envelope = {
     ver: 'sakai:safety-envelope/1',

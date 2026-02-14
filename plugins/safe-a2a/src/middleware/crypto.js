@@ -1,4 +1,9 @@
 const crypto = require('crypto');
+let blake3Native = null;
+
+try {
+  blake3Native = require('@napi-rs/blake-hash').blake3;
+} catch {}
 
 function normalizeMethod(method) {
   return (method || 'POST').toUpperCase();
@@ -47,21 +52,37 @@ function payloadToBuffer(payload) {
   return Buffer.from(stableStringify(payload));
 }
 
-function computePayloadHash(payload) {
+function computePayloadHash(payload, algorithm = 'sha256') {
   const buf = payloadToBuffer(payload);
+  if (algorithm === 'blake3') {
+    if (!blake3Native) return null;
+    return `blake3:${blake3Native(buf).toString('hex')}`;
+  }
   const hex = crypto.createHash('sha256').update(buf).digest('hex');
   return `sha256:${hex}`;
 }
 
-function normalizeHashValue(raw) {
-  if (!raw) return '';
-  return String(raw).replace(/^sha256:/i, '');
+function parseHashAlgorithm(value) {
+  const raw = String(value || '').toLowerCase();
+  if (raw.startsWith('sha256:')) return 'sha256';
+  if (raw.startsWith('blake3:')) return 'blake3';
+  return null;
 }
 
-function payloadHashMatches(expected, actual) {
-  const a = normalizeHashValue(expected);
-  const b = normalizeHashValue(actual);
-  return !!a && !!b && a === b;
+function normalizeHashString(value) {
+  return String(value || '').toLowerCase();
+}
+
+function verifyPayloadHash(payload, expected) {
+  if (!expected) return { ok: false, reason: 'PAYLOAD_HASH_MISSING' };
+  const algorithm = parseHashAlgorithm(expected);
+  if (!algorithm) return { ok: false, reason: 'PAYLOAD_HASH_ALG' };
+  const computed = computePayloadHash(payload, algorithm);
+  if (!computed) return { ok: false, reason: 'PAYLOAD_HASH_ALG_UNSUPPORTED' };
+  if (normalizeHashString(computed) !== normalizeHashString(expected)) {
+    return { ok: false, reason: 'PAYLOAD_HASH_MISMATCH', computed };
+  }
+  return { ok: true, computed };
 }
 
 async function verifySignature(envelope, config) {
@@ -77,6 +98,6 @@ module.exports = {
   stableStringify,
   canonicalizeEnvelope,
   computePayloadHash,
-  payloadHashMatches,
+  verifyPayloadHash,
   verifySignature
 };

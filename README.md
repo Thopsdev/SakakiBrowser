@@ -159,8 +159,9 @@ npm start
   - Mode: `SAKAKI_A2A_MODE=strict` (or `vault_only`)
   - Shared secret: `SAKAKI_A2A_SHARED_SECRET`
   - Purposes allowlist: `SAKAKI_A2A_ALLOWED_PURPOSES=...`
-  - Receiver: `SAKAKI_A2A_RECEIVER_AUD=...`
+ - Receiver: `SAKAKI_A2A_RECEIVER_AUD=...`
   - Domain allowlist is enforced via the envelope `constraints.allowed_domains` (exact match; use `*.example.com` for subdomains)
+  - Payload hash algorithm for examples: `SAKAKI_A2A_HASH_ALG=sha256|blake3`
   - Protected paths: `SAKAKI_A2A_PROTECTED_PATHS=/navigate,/click,/type,/secure,/fast,/vault/proxy,/vault/browser/execute,/remote`
 
 Production template: `docs/production.env.example`.

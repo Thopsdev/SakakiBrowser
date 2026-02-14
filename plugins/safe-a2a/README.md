@@ -60,7 +60,7 @@ payload = canonical_json(envelope_without_sig_value)
 sig.alg = \"hmac-sha256\"
 sig.value = hex(hmac_sha256(SAKAKI_A2A_SHARED_SECRET, payload))
 ```
-`payload_hash` should be `sha256` of the payload (canonical JSON for objects), formatted as `sha256:<hex>`.
+`payload_hash` can be `sha256` or `blake3` of the payload (canonical JSON for objects), formatted as `sha256:<hex>` or `blake3:<hex>`.
 
 Envelope Example
 ```json

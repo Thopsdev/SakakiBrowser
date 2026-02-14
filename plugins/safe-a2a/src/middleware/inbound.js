@@ -1,5 +1,5 @@
 const { detectSensitive } = require('./dlp');
-const { verifySignature, computePayloadHash, payloadHashMatches } = require('./crypto');
+const { verifySignature, verifyPayloadHash } = require('./crypto');
 const { buildAuditEvent, emitAudit } = require('./audit');
 const { requiresVault, hasVaultRefs } = require('./vault');
 const { createNonceStore } = require('./replay');
@@ -87,9 +87,13 @@ async function inboundGuard(ctx, config) {
     }
   }
 
-  const payloadHash = computePayloadHash(ctx.payload);
-  if (envelope && envelope.payload_hash && !payloadHashMatches(envelope.payload_hash, payloadHash)) {
-    reasons.push('PAYLOAD_HASH_MISMATCH');
+  let payloadHash = null;
+  if (envelope && envelope.payload_hash) {
+    const hashCheck = verifyPayloadHash(ctx.payload, envelope.payload_hash);
+    payloadHash = hashCheck.computed || null;
+    if (!hashCheck.ok) {
+      reasons.push(hashCheck.reason || 'PAYLOAD_HASH_MISMATCH');
+    }
   }
 
   const dlp = detectSensitive(ctx.payload);
