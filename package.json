@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:e2e": "node test/e2e/smoke.js"
+    "test:e2e": "node test/e2e/smoke.js",
+    "test:strict": "node test/strict-mode-test.js"
   },
   "keywords": [
     "browser-automation",
