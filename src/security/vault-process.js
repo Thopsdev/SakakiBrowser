@@ -21,13 +21,21 @@ const { URL } = require('url');
 const { resolveBackendConfig, launchBrowser, normalizeWaitUntil } = require('../browser/backend');
 const { attachRequestInterception } = require('../browser/request-interceptor');
 
+const MODE = String(process.env.SAKAKI_MODE || '').toLowerCase().trim();
+const VAULT_ONLY_MODE = process.env.SAKAKI_VAULT_ONLY === '1'
+  || MODE === 'strict'
+  || MODE === 'vault_only'
+  || MODE === 'vault-only'
+  || MODE === 'vaultonly';
+const STRICT_MODE = VAULT_ONLY_MODE;
+
 // ========== Proxy Configuration ==========
 let proxyConfig = {
   enabled: true,
   signingKey: crypto.randomBytes(32).toString('hex'),
   publicKeyId: crypto.randomBytes(8).toString('hex'),
   allowedDomains: new Set(), // Empty = allow all
-  enforceVaultProxy: false   // For external services: true = Vault required
+  enforceVaultProxy: VAULT_ONLY_MODE   // For external services: true = Vault required
 };
 
 // ========== Configuration ==========
@@ -36,9 +44,9 @@ const SOCKET_PATH = process.env.VAULT_SOCKET || DEFAULT_SOCKET_PATH;
 const VAULT_FILE = process.env.VAULT_FILE || path.join(__dirname, '../../.vault.enc');
 const MAX_FAILED_ATTEMPTS = 10;
 const LOCKOUT_DURATION = 60000; // 1 minute
-const PROXY_ALLOW_HTTP = process.env.SAKAKI_PROXY_ALLOW_HTTP === '1';
-const PROXY_ALLOW_PRIVATE = process.env.SAKAKI_PROXY_ALLOW_PRIVATE === '1';
-const PROXY_REQUIRE_ALLOWLIST = process.env.SAKAKI_PROXY_REQUIRE_ALLOWLIST === '1';
+const PROXY_ALLOW_HTTP = !STRICT_MODE && process.env.SAKAKI_PROXY_ALLOW_HTTP === '1';
+const PROXY_ALLOW_PRIVATE = !STRICT_MODE && process.env.SAKAKI_PROXY_ALLOW_PRIVATE === '1';
+const PROXY_REQUIRE_ALLOWLIST = VAULT_ONLY_MODE || process.env.SAKAKI_PROXY_REQUIRE_ALLOWLIST === '1';
 const PROXY_MAX_RESPONSE_BYTES = parseInt(
   process.env.SAKAKI_PROXY_MAX_BYTES || '2097152',
   10
@@ -76,10 +84,11 @@ const VAULT_PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_VAULT_PUPPETEER_
 const VAULT_BROWSER_ALLOW_SUBDOMAINS =
   process.env.SAKAKI_VAULT_BROWSER_ALLOW_SUBDOMAINS === '1' ||
   process.env.SAKAKI_SECURE_ALLOW_SUBDOMAINS === '1';
-const VAULT_BROWSER_ALLOW_HTTP =
+const VAULT_BROWSER_ALLOW_HTTP = !STRICT_MODE && (
   process.env.SAKAKI_VAULT_BROWSER_ALLOW_HTTP === '1' ||
-  process.env.SAKAKI_SECURE_ALLOW_HTTP === '1';
-const VAULT_BROWSER_ALLOW_PRIVATE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
+  process.env.SAKAKI_SECURE_ALLOW_HTTP === '1'
+);
+const VAULT_BROWSER_ALLOW_PRIVATE = !STRICT_MODE && process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
 const VAULT_BROWSER_MAX_ACTIONS = parseInt(
   process.env.SAKAKI_VAULT_BROWSER_MAX_ACTIONS || '50',
   10
@@ -1001,8 +1010,8 @@ const handlers = {
     const config = {
       allowedDomains,
       allowSubdomains: !!params.allowSubdomains || VAULT_BROWSER_ALLOW_SUBDOMAINS,
-      allowHttp: !!params.allowHttp || VAULT_BROWSER_ALLOW_HTTP,
-      allowPrivate: !!params.allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE
+      allowHttp: STRICT_MODE ? false : (!!params.allowHttp || VAULT_BROWSER_ALLOW_HTTP),
+      allowPrivate: STRICT_MODE ? false : (!!params.allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE)
     };
 
     if (!config.allowedDomains.length) {
@@ -1123,8 +1132,8 @@ const handlers = {
     const config = {
       allowedDomains,
       allowSubdomains: !!params.allowSubdomains || VAULT_BROWSER_ALLOW_SUBDOMAINS,
-      allowHttp: !!params.allowHttp || VAULT_BROWSER_ALLOW_HTTP,
-      allowPrivate: !!params.allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE
+      allowHttp: STRICT_MODE ? false : (!!params.allowHttp || VAULT_BROWSER_ALLOW_HTTP),
+      allowPrivate: STRICT_MODE ? false : (!!params.allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE)
     };
 
     if (!config.allowedDomains.length) {
@@ -1284,6 +1293,15 @@ const handlers = {
 
   // Proxy configuration
   proxyConfig(params) {
+    if (STRICT_MODE) {
+      if (params.enabled === false) {
+        return { success: false, error: 'Vault-only mode requires proxy enabled' };
+      }
+      if (params.enforceVaultProxy === false) {
+        return { success: false, error: 'Vault-only mode requires enforceVaultProxy=true' };
+      }
+    }
+
     if (params.enabled !== undefined) {
       proxyConfig.enabled = params.enabled;
     }
@@ -1294,6 +1312,13 @@ const handlers = {
       proxyConfig.allowedDomains.add(params.addDomain);
     }
     if (params.removeDomain) {
+      if (STRICT_MODE && PROXY_REQUIRE_ALLOWLIST) {
+        const willRemoveLast = proxyConfig.allowedDomains.size === 1 &&
+          proxyConfig.allowedDomains.has(params.removeDomain);
+        if (willRemoveLast) {
+          return { success: false, error: 'Vault-only mode requires non-empty allowlist' };
+        }
+      }
       proxyConfig.allowedDomains.delete(params.removeDomain);
     }
 
@@ -1404,7 +1429,8 @@ const handlers = {
     // Add Vault signature
     const timestamp = Date.now().toString();
     const bodyStr = typeof body === 'object' ? JSON.stringify(body) : (body || '');
-    const signPayload = `${request.method || 'GET'}\n${request.url}\n${timestamp}\n${bodyStr}`;
+    const methodUpper = String(request.method || 'GET').toUpperCase();
+    const signPayload = `${methodUpper}\n${request.url}\n${timestamp}\n${bodyStr}`;
     const signature = crypto
       .createHmac('sha256', proxyConfig.signingKey)
       .update(signPayload)

@@ -45,16 +45,23 @@ app.use(express.json({ limit: MAX_JSON_SIZE }));
 const BIND = process.env.SAKAKI_BIND || process.env.HOST || '127.0.0.1';
 const ADMIN_TOKEN = process.env.SAKAKI_ADMIN_TOKEN || '';
 const ALLOW_INSECURE_VAULT = process.env.SAKAKI_ALLOW_INSECURE_VAULT === '1';
+const MODE = String(process.env.SAKAKI_MODE || '').toLowerCase().trim();
+const VAULT_ONLY_MODE = process.env.SAKAKI_VAULT_ONLY === '1'
+  || MODE === 'strict'
+  || MODE === 'vault_only'
+  || MODE === 'vault-only'
+  || MODE === 'vaultonly';
+const STRICT_MODE = VAULT_ONLY_MODE;
 const SECURE_ALLOWED_DOMAINS = (process.env.SAKAKI_SECURE_ALLOWED_DOMAINS || '')
   .split(',')
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
 const SECURE_ALLOW_SUBDOMAINS = process.env.SAKAKI_SECURE_ALLOW_SUBDOMAINS === '1';
-const SECURE_ALLOW_HTTP = process.env.SAKAKI_SECURE_ALLOW_HTTP === '1';
-const SECURE_ALLOW_SENSITIVE = process.env.SAKAKI_SECURE_ALLOW_SENSITIVE === '1';
-const SECURE_ALLOW_PRIVATE = process.env.SAKAKI_SECURE_ALLOW_PRIVATE === '1';
-const VAULT_BROWSER_ALLOW_PRIVATE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
-const VAULT_BROWSER_ALLOW_SENSITIVE = process.env.SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE === '1';
+const SECURE_ALLOW_HTTP = !STRICT_MODE && process.env.SAKAKI_SECURE_ALLOW_HTTP === '1';
+const SECURE_ALLOW_SENSITIVE = !STRICT_MODE && process.env.SAKAKI_SECURE_ALLOW_SENSITIVE === '1';
+const SECURE_ALLOW_PRIVATE = !STRICT_MODE && process.env.SAKAKI_SECURE_ALLOW_PRIVATE === '1';
+const VAULT_BROWSER_ALLOW_PRIVATE = !STRICT_MODE && process.env.SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE === '1';
+const VAULT_BROWSER_ALLOW_SENSITIVE = !STRICT_MODE && process.env.SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE === '1';
 const VAULT_BROWSER_MAX_ACTIONS = parseInt(
   process.env.SAKAKI_VAULT_BROWSER_MAX_ACTIONS || '50',
   10
@@ -121,6 +128,10 @@ const PUPPETEER_EXTRA_ARGS = parseListValue(
 const PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
 const SKIP_BROWSER_INIT = process.env.SAKAKI_SKIP_BROWSER_INIT === '1';
 
+if (VAULT_ONLY_MODE) {
+  vaultEnforcement.setEnforceVaultProxy(true);
+}
+
 let BACKEND_CONFIG;
 try {
   BACKEND_CONFIG = resolveBackendConfig('main');
@@ -137,7 +148,6 @@ const safeA2ABridge = createSafeA2ABridge(process.env, { onBlock: recordA2ABlock
 if (safeA2ABridge.enabled) {
   app.use(safeA2ABridge.middleware);
 }
-
 function isLocalRequest(req) {
   const addr = req.socket?.remoteAddress || '';
   return (
@@ -349,7 +359,6 @@ function enforceA2ADomainList(req, res, domains, context) {
   }
   return true;
 }
-
 function isPrivateIPv4(ip) {
   const parts = ip.split('.').map(n => parseInt(n, 10));
   if (parts.length !== 4 || parts.some(n => Number.isNaN(n))) return false;
@@ -1500,6 +1509,24 @@ app.post('/type', async (req, res) => {
     return res.json({ error: 'selector and text required' });
   }
 
+  if (VAULT_ONLY_MODE) {
+    const warnings = detectSensitiveData(text);
+    if (warnings.length > 0) {
+      notifyApprovalRequired({
+        lane: 'default',
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        selector
+      });
+      return res.json({
+        blocked: true,
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        hint: 'Use /vault/browser/execute with typeFromVault'
+      });
+    }
+  }
+
   if (!currentPage) {
     return res.json({ error: 'No page open. Call /navigate first' });
   }
@@ -1556,6 +1583,21 @@ app.post('/submit-form', async (req, res) => {
 
   // Sensitive data check
   const vaultCheck = guardian.beforeFormSubmit(formData, url);
+  if (VAULT_ONLY_MODE && vaultCheck.warnings && vaultCheck.warnings.length > 0) {
+    notifyApprovalRequired({
+      lane: 'default',
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      url,
+      warnings: vaultCheck.warnings,
+      fields: Object.keys(formData || {})
+    });
+    return res.json({
+      blocked: true,
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      warnings: vaultCheck.warnings,
+      hint: 'Use /vault/browser/execute for secret-bearing forms'
+    });
+  }
   if (vaultCheck.requiresApproval) {
     notifyApprovalRequired({
       lane: 'default',
@@ -1837,6 +1879,24 @@ app.post('/secure/type', async (req, res) => {
     return res.json({ error: 'selector and text required' });
   }
 
+  if (VAULT_ONLY_MODE) {
+    const warnings = detectSensitiveData(text);
+    if (warnings.length > 0) {
+      notifyApprovalRequired({
+        lane: 'secure',
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        selector
+      });
+      return res.json({
+        blocked: true,
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        hint: 'Use /vault/browser/execute with typeFromVault'
+      });
+    }
+  }
+
   if (!SECURE_ALLOW_SENSITIVE) {
     const warnings = detectSensitiveData(text);
     if (warnings.length > 0) {
@@ -1906,6 +1966,21 @@ app.post('/secure/submit-form', async (req, res) => {
   }
 
   const vaultCheck = guardian.beforeFormSubmit(formData, url);
+  if (VAULT_ONLY_MODE && vaultCheck.warnings && vaultCheck.warnings.length > 0) {
+    notifyApprovalRequired({
+      lane: 'secure',
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      url,
+      warnings: vaultCheck.warnings,
+      fields: Object.keys(formData || {})
+    });
+    return res.json({
+      blocked: true,
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      warnings: vaultCheck.warnings,
+      hint: 'Use /vault/browser/execute for secret-bearing forms'
+    });
+  }
   if (vaultCheck.requiresApproval && !SECURE_ALLOW_SENSITIVE) {
     notifyApprovalRequired({
       lane: 'secure',
@@ -1982,7 +2057,6 @@ app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (re
   } = req.body || {};
 
   if (!enforceA2ATool(req, res, 'remote_start')) return;
-
   if (remoteSessions.size >= REMOTE_VIEW_MAX_SESSIONS) {
     return res.status(429).json({ error: 'Too many remote sessions' });
   }
@@ -2466,7 +2540,6 @@ app.post('/vault/browser/execute', async (req, res) => {
 
   if (!enforceA2ATool(req, res, 'vault_browser_execute')) return;
   if (!enforceA2ADomainList(req, res, effectiveAllowedDomains, 'vault_browser_execute')) return;
-
   if (!effectiveAllowedDomains.length) {
     return res.json({
       error: 'allowedDomains required',
@@ -2474,17 +2547,23 @@ app.post('/vault/browser/execute', async (req, res) => {
     });
   }
 
-  const check = validateBrowserActions(actions, allowSensitive || VAULT_BROWSER_ALLOW_SENSITIVE);
+  const allowSensitiveInput = STRICT_MODE
+    ? false
+    : (allowSensitive || VAULT_BROWSER_ALLOW_SENSITIVE);
+  const check = validateBrowserActions(actions, allowSensitiveInput);
   if (!check.ok) {
     return res.json(check);
   }
+
+  const allowHttpFinal = STRICT_MODE ? false : (!!allowHttp || SECURE_ALLOW_HTTP);
+  const allowPrivateFinal = STRICT_MODE ? false : (!!allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE);
 
   const result = await vaultClient.browserExecute({
     actions,
     allowedDomains: effectiveAllowedDomains,
     allowSubdomains: !!allowSubdomains || SECURE_ALLOW_SUBDOMAINS,
-    allowHttp: !!allowHttp || SECURE_ALLOW_HTTP,
-    allowPrivate: !!allowPrivate || VAULT_BROWSER_ALLOW_PRIVATE,
+    allowHttp: allowHttpFinal,
+    allowPrivate: allowPrivateFinal,
     timeout
   });
 
@@ -2510,6 +2589,11 @@ app.get('/service/vault-enforcement', requireVaultAdmin, (req, res) => {
 app.post('/service/vault-enforcement', requireVaultAdmin, (req, res) => {
   const { enforceVaultProxy } = req.body;
   if (typeof enforceVaultProxy === 'boolean') {
+    if (VAULT_ONLY_MODE && enforceVaultProxy === false) {
+      return res.status(403).json({
+        error: 'Vault-only mode requires enforceVaultProxy=true'
+      });
+    }
     vaultEnforcement.setEnforceVaultProxy(enforceVaultProxy);
   }
   res.json(vaultEnforcement.getConfig());
@@ -3472,7 +3556,7 @@ async function main() {
   }
 
   if (SKIP_BROWSER_INIT) {
-    console.warn('[Sakaki-Browser] SAKAKI_SKIP_BROWSER_INIT=1 (browser not initialized).');
+    console.warn('[Sakaki-Browser] Browser init skipped (SAKAKI_SKIP_BROWSER_INIT=1).');
   } else {
     await initBrowser();
   }

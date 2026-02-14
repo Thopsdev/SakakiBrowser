@@ -10,6 +10,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test:e2e": "node test/e2e/smoke.js",
+    "test:strict": "node test/strict-mode-test.js",
     "test:safe-a2a": "node plugins/safe-a2a/examples/run-vectors.js"
   },
   "keywords": [
@@ -21,6 +22,13 @@
   ],
   "author": "Thops",
   "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "plugins/",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@napi-rs/blake-hash": "^1.3.6",
     "@noble/hashes": "^2.0.1",
