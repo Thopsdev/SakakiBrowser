@@ -679,30 +679,38 @@ await fastBrowser.click('login_button');
 
 ## Architecture
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                     Sakaki Browser                          │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │   Browser    │  │   Guardian   │  │  Antivirus   │       │
-│  │    Pool      │  │ (audit+pol)  │  │   Scanner    │       │
-│  └──────────────┘  └──────────────┘  └──────────────┘       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │  Semantic    │  │  WebSocket   │  │   Webhook    │       │
-│  │   Finder     │  │    Proxy     │  │  Receiver    │       │
-│  └──────────────┘  └──────────────┘  └──────────────┘       │
-├─────────────────────────────────────────────────────────────┤
-│                    Unix Socket IPC                          │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │                  Vault Process                        │   │
-│  │ • Process isolation                                    │   │
-│  │ • No public retrieve (verify-only)                     │   │
-│  │ • Proxy injects secrets internally                     │   │
-│  │ • Vault-signed requests (HMAC)                         │   │
-│  │ • BLAKE3 + SecureBuffer (auto-zeroing)                 │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph SB["Sakaki Browser"]
+    direction TB
+
+    subgraph R1[""]
+      direction LR
+      BP["Browser Pool"]
+      G["Guardian<br/>(audit + policy)"]
+      AV["Antivirus<br/>Scanner"]
+    end
+
+    subgraph R2[""]
+      direction LR
+      SF["Semantic Finder"]
+      WS["WebSocket Proxy"]
+      WH["Webhook Receiver"]
+    end
+
+    IPC["Unix Socket IPC"]
+
+    VP["Vault Process<br/>
+    • Process isolation<br/>
+    • No public retrieve (verify-only)<br/>
+    • Proxy injects secrets internally<br/>
+    • Vault-signed requests (HMAC)<br/>
+    • BLAKE3 + SecureBuffer (auto-zeroing)"]
+
+    R1 --> IPC
+    R2 --> IPC
+    IPC --> VP
+  end
 ```
 
 ---
