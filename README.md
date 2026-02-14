@@ -184,6 +184,9 @@ npm start
 ```
 node plugins/safe-a2a/examples/send-navigate.js
 ```
+
+Production A2A template: `docs/production-a2a.md`.
+
 ## Reverse Proxy (TLS)
 
 Bind Sakaki to localhost and terminate TLS at a reverse proxy.
@@ -729,12 +732,7 @@ flowchart TB
 
     IPC["Unix Socket IPC"]
 
-    VP["Vault Process<br/>
-    • Process isolation<br/>
-    • No public retrieve (verify-only)<br/>
-    • Proxy injects secrets internally<br/>
-    • Vault-signed requests (HMAC)<br/>
-    • BLAKE3 + SecureBuffer (auto-zeroing)"]
+    VP["Vault Process<br/>• Process isolation<br/>• No public retrieve (verify-only)<br/>• Proxy injects secrets internally<br/>• Vault-signed requests (HMAC)<br/>• BLAKE3 + SecureBuffer (auto-zeroing)"]
 
     Core --> IPC
     Integrations --> IPC
