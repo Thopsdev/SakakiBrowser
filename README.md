@@ -202,11 +202,36 @@ Set `SAKAKI_MODE=strict` (or `SAKAKI_MODE=vault_only`, `SAKAKI_VAULT_ONLY=1`) to
 - Sensitive input is **blocked** in public and secure lanes. Use `/vault/browser/execute` with `typeFromVault`.
 - Vault proxy requires an **allowlist** (`SAKAKI_PROXY_REQUIRE_ALLOWLIST=1` enforced).
 - External APIs can be forced to accept **Vault-signed requests only** (`enforceVaultProxy=true`).
+- Unsafe toggles are **forced OFF** (HTTP/private/sensitive allow flags are ignored).
 
 This mode is designed for “agent runs without secret exposure.”
 
 Provider template:
 - `examples/provider/express-vault-enforcement.js`
+
+## Vault Proxy Signature Spec
+
+Vault-signed requests include these headers:
+
+- `X-Vault-Signature`
+- `X-Vault-KeyId`
+- `X-Vault-Timestamp`
+- `X-Vault-Proxy`
+
+Signature payload (HMAC-SHA256):
+
+```
+${METHOD}\n${FULL_URL}\n${TIMESTAMP}\n${BODY}
+```
+
+Rules:
+
+- `METHOD` is uppercased.
+- `FULL_URL` is `scheme://host/path?query`. In reverse proxies, use `X-Forwarded-Proto` and `X-Forwarded-Host` if present.
+- `TIMESTAMP` is milliseconds since epoch (string). Default acceptance window is 5 minutes.
+- `BODY` is `JSON.stringify(req.body)` for JSON requests, otherwise the raw body string. Empty body = empty string.
+
+This spec matches the default `createVaultVerificationMiddleware()` implementation.
 
 ## Responsible Use
 
