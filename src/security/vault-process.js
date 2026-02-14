@@ -21,13 +21,20 @@ const { URL } = require('url');
 const { resolveBackendConfig, launchBrowser, normalizeWaitUntil } = require('../browser/backend');
 const { attachRequestInterception } = require('../browser/request-interceptor');
 
+const MODE = String(process.env.SAKAKI_MODE || '').toLowerCase().trim();
+const VAULT_ONLY_MODE = process.env.SAKAKI_VAULT_ONLY === '1'
+  || MODE === 'strict'
+  || MODE === 'vault_only'
+  || MODE === 'vault-only'
+  || MODE === 'vaultonly';
+
 // ========== Proxy Configuration ==========
 let proxyConfig = {
   enabled: true,
   signingKey: crypto.randomBytes(32).toString('hex'),
   publicKeyId: crypto.randomBytes(8).toString('hex'),
   allowedDomains: new Set(), // Empty = allow all
-  enforceVaultProxy: false   // For external services: true = Vault required
+  enforceVaultProxy: VAULT_ONLY_MODE   // For external services: true = Vault required
 };
 
 // ========== Configuration ==========
@@ -38,7 +45,7 @@ const MAX_FAILED_ATTEMPTS = 10;
 const LOCKOUT_DURATION = 60000; // 1 minute
 const PROXY_ALLOW_HTTP = process.env.SAKAKI_PROXY_ALLOW_HTTP === '1';
 const PROXY_ALLOW_PRIVATE = process.env.SAKAKI_PROXY_ALLOW_PRIVATE === '1';
-const PROXY_REQUIRE_ALLOWLIST = process.env.SAKAKI_PROXY_REQUIRE_ALLOWLIST === '1';
+const PROXY_REQUIRE_ALLOWLIST = VAULT_ONLY_MODE || process.env.SAKAKI_PROXY_REQUIRE_ALLOWLIST === '1';
 const PROXY_MAX_RESPONSE_BYTES = parseInt(
   process.env.SAKAKI_PROXY_MAX_BYTES || '2097152',
   10
