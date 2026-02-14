@@ -209,7 +209,7 @@ for (const text of FALSE_POSITIVES) {
   const result = detector.scanString(text);
   if (!result.clean) {
     falsePositives++;
-    console.log(`  ⚠ False positive: "${text}" detected as ${result.findings.map(f => f.type).join(', ')}`);
+    console.log(`  WARN False positive: "${text}" detected as ${result.findings.map(f => f.type).join(', ')}`);
   }
 }
 test(`False positive rate: ${falsePositives}/${FALSE_POSITIVES.length}`, () => {

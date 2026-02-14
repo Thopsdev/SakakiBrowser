@@ -3067,7 +3067,7 @@ app.get('/vault', async (req, res) => {
   </style>
 </head>
 <body>
-  <h1>🔐 Sakaki Vault</h1>
+  <h1>Sakaki Vault</h1>
 
   <div class="card">
     <h2>Status</h2>
@@ -3090,12 +3090,12 @@ app.get('/vault', async (req, res) => {
   <div class="card">
     <h2>Security Features</h2>
     <div class="features">
-      <div class="feature"><span class="icon">🚫</span> No public retrieve() API (Vault-only verification)</div>
-      <div class="feature"><span class="icon">🔒</span> Separate process isolation</div>
-      <div class="feature"><span class="icon">🧹</span> SecureBuffer auto-wipe</div>
-      <div class="feature"><span class="icon">🛡️</span> Auto-lock on tamper</div>
-      <div class="feature"><span class="icon">📝</span> Full audit logging</div>
-      <div class="feature"><span class="icon">💾</span> Encrypted persistence</div>
+      <div class="feature"><span class="icon">X</span> No public retrieve() API (Vault-only verification)</div>
+      <div class="feature"><span class="icon">Lock</span> Separate process isolation</div>
+      <div class="feature"><span class="icon">Wipe</span> SecureBuffer auto-wipe</div>
+      <div class="feature"><span class="icon">Guard</span> Auto-lock on tamper</div>
+      <div class="feature"><span class="icon">Audit</span> Full audit logging</div>
+      <div class="feature"><span class="icon">Store</span> Encrypted persistence</div>
     </div>
   </div>
 

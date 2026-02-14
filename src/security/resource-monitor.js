@@ -111,7 +111,7 @@ function checkAnomalies(sample) {
   for (const alert of alerts) {
     alert.timestamp = sample.timestamp;
     monitorState.alerts.push(alert);
-    console.warn(`[ResourceMonitor] ⚠️  ${alert.message}`);
+    console.warn(`[ResourceMonitor] WARN ${alert.message}`);
   }
 
   // Keep only last 50 alerts

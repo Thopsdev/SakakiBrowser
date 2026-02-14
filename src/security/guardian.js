@@ -41,7 +41,7 @@ function logAction(action, details, risk = RISK_LEVELS.LOW, blocked = false) {
   auditLog.push(entry);
 
   if (risk === RISK_LEVELS.HIGH || risk === RISK_LEVELS.CRITICAL) {
-    console.warn(`[Guardian] ⚠️  ${risk.toUpperCase()}: ${action}`, details);
+    console.warn(`[Guardian] WARN ${risk.toUpperCase()}: ${action}`, details);
   }
 
   return entry;
