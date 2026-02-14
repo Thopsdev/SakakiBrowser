@@ -23,13 +23,13 @@ const RISK_LEVELS = {
 };
 
 // Log operation
-function logAction(action, details, risk = RISK_LEVELS.LOW) {
+function logAction(action, details, risk = RISK_LEVELS.LOW, blocked = false) {
   const entry = {
     timestamp: new Date().toISOString(),
     action,
     details,
     risk,
-    blocked: false
+    blocked: !!blocked
   };
   auditLog.push(entry);
 

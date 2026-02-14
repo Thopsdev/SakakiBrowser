@@ -33,6 +33,7 @@ const { notificationCenter } = require('./realtime/notification-center');
 const fastHash = require('./security/fast-hash');
 const { secretDetector } = require('./security/secret-detector');
 const { semanticFinder } = require('./browser/semantic-finder');
+const { createSafeA2ABridge } = require('./plugins/safe-a2a-bridge');
 
 // Vault verification settings for external services
 const vaultEnforcement = new VaultEnforcementConfig();
@@ -118,6 +119,7 @@ const PUPPETEER_EXTRA_ARGS = parseListValue(
   process.env.SAKAKI_PUPPETEER_ARGS || process.env.SAKAKI_CHROME_ARGS || ''
 );
 const PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
+const SKIP_BROWSER_INIT = process.env.SAKAKI_SKIP_BROWSER_INIT === '1';
 
 let BACKEND_CONFIG;
 try {
@@ -130,6 +132,11 @@ const BROWSER_BACKEND = BACKEND_CONFIG.backend;
 const WAIT_UNTIL_NETWORK_IDLE = normalizeWaitUntil('networkidle2', BROWSER_BACKEND);
 
 notificationCenter.configureFromEnv(process.env);
+
+const safeA2ABridge = createSafeA2ABridge(process.env, { onBlock: recordA2ABlock });
+if (safeA2ABridge.enabled) {
+  app.use(safeA2ABridge.middleware);
+}
 
 function isLocalRequest(req) {
   const addr = req.socket?.remoteAddress || '';
@@ -187,6 +194,160 @@ function domainMatches(hostname, list) {
   const host = normalizeHost(hostname);
   if (!host) return false;
   return list.some((d) => host === d || host.endsWith('.' + d));
+}
+
+const a2aMetrics = {
+  total: 0,
+  blocked: 0,
+  byReason: {},
+  byTool: {},
+  byPurpose: {},
+  byDomain: {}
+};
+
+function incMetric(map, key) {
+  if (!key) return;
+  map[key] = (map[key] || 0) + 1;
+}
+
+function recordA2ABlock({ req, reason, reasons, tool, host, context }) {
+  a2aMetrics.total += 1;
+  a2aMetrics.blocked += 1;
+
+  const envelope = req?.a2aEnvelope;
+  const reasonList = Array.isArray(reasons) && reasons.length ? reasons : (reason ? [reason] : []);
+  reasonList.forEach((r) => incMetric(a2aMetrics.byReason, r));
+
+  incMetric(a2aMetrics.byTool, tool);
+  incMetric(a2aMetrics.byDomain, host);
+  if (envelope?.purpose) incMetric(a2aMetrics.byPurpose, envelope.purpose);
+
+  guardian.logAction('a2a_block', {
+    reasons: reasonList,
+    tool,
+    host,
+    context,
+    trace_id: envelope?.trace_id || null,
+    purpose: envelope?.purpose || null,
+    classification: envelope?.classification || null,
+    data_tags: envelope?.data_tags || null,
+    iss: envelope?.iss || null,
+    aud: envelope?.aud || null
+  }, guardian.RISK_LEVELS.HIGH, true);
+}
+
+function getA2AStats() {
+  return {
+    ...a2aMetrics,
+    byReason: { ...a2aMetrics.byReason },
+    byTool: { ...a2aMetrics.byTool },
+    byPurpose: { ...a2aMetrics.byPurpose },
+    byDomain: { ...a2aMetrics.byDomain }
+  };
+}
+
+function getA2AAllowedDomains(req) {
+  const list = req?.a2aEnvelope?.constraints?.allowed_domains;
+  if (!Array.isArray(list)) return null;
+  return list.map(normalizeHost).filter(Boolean);
+}
+
+function enforceA2ATool(req, res, toolName) {
+  const envelope = req?.a2aEnvelope;
+  if (!envelope) return true;
+  const constraints = envelope.constraints || {};
+  const disallowed = Array.isArray(constraints.disallowed_actions) ? constraints.disallowed_actions : [];
+  if (disallowed.includes(toolName)) {
+    recordA2ABlock({ req, reason: 'A2A_TOOL_DISALLOWED', tool: toolName, context: 'tool' });
+    res.status(403).json({
+      error: 'A2A tool blocked',
+      reason: 'A2A_TOOL_DISALLOWED',
+      tool: toolName,
+      disallowed_actions: disallowed
+    });
+    return false;
+  }
+  const allowed = Array.isArray(constraints.allowed_tools) ? constraints.allowed_tools : null;
+  if (allowed && allowed.length > 0 && !allowed.includes(toolName)) {
+    recordA2ABlock({ req, reason: 'A2A_TOOL_NOT_ALLOWED', tool: toolName, context: 'tool' });
+    res.status(403).json({
+      error: 'A2A tool blocked',
+      reason: 'A2A_TOOL_NOT_ALLOWED',
+      tool: toolName,
+      allowed_tools: allowed
+    });
+    return false;
+  }
+  return true;
+}
+
+function enforceA2ADomain(req, res, url, context) {
+  const envelope = req?.a2aEnvelope;
+  if (!envelope) return true;
+  const allowed = getA2AAllowedDomains(req);
+  if (!allowed || allowed.length === 0) {
+    recordA2ABlock({ req, reason: 'A2A_ALLOWLIST_MISSING', context });
+    res.status(403).json({
+      error: 'A2A allowlist required',
+      reason: 'A2A_ALLOWLIST_MISSING',
+      context
+    });
+    return false;
+  }
+  if (!url) return true;
+  let host;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    recordA2ABlock({ req, reason: 'A2A_URL_INVALID', context });
+    res.status(400).json({
+      error: 'Invalid URL',
+      reason: 'A2A_URL_INVALID',
+      context
+    });
+    return false;
+  }
+  if (!domainMatches(host, allowed)) {
+    recordA2ABlock({ req, reason: 'A2A_DOMAIN_NOT_ALLOWED', host, context });
+    res.status(403).json({
+      error: 'A2A domain blocked',
+      reason: 'A2A_DOMAIN_NOT_ALLOWED',
+      host,
+      allowed_domains: allowed,
+      context
+    });
+    return false;
+  }
+  return true;
+}
+
+function enforceA2ADomainList(req, res, domains, context) {
+  const envelope = req?.a2aEnvelope;
+  if (!envelope) return true;
+  const allowed = getA2AAllowedDomains(req);
+  if (!allowed || allowed.length === 0) {
+    recordA2ABlock({ req, reason: 'A2A_ALLOWLIST_MISSING', context });
+    res.status(403).json({
+      error: 'A2A allowlist required',
+      reason: 'A2A_ALLOWLIST_MISSING',
+      context
+    });
+    return false;
+  }
+  const normalized = (domains || []).map(normalizeHost).filter(Boolean);
+  const invalid = normalized.filter((d) => !domainMatches(d, allowed));
+  if (invalid.length > 0) {
+    recordA2ABlock({ req, reason: 'A2A_DOMAIN_NOT_ALLOWED', host: invalid[0], context });
+    res.status(403).json({
+      error: 'A2A domain blocked',
+      reason: 'A2A_DOMAIN_NOT_ALLOWED',
+      invalid_domains: invalid,
+      allowed_domains: allowed,
+      context
+    });
+    return false;
+  }
+  return true;
 }
 
 function isPrivateIPv4(ip) {
@@ -1102,6 +1263,8 @@ async function createSecurePage() {
 
 app.post('/navigate', async (req, res) => {
   const { url, skipSecurityCheck } = req.body;
+  if (!enforceA2ATool(req, res, 'navigate')) return;
+  if (!enforceA2ADomain(req, res, url, 'navigate')) return;
 
   // Security check
   let securityCheck = null;
@@ -1225,6 +1388,8 @@ app.post('/close', async (req, res) => {
 // Screenshot
 app.post('/screenshot', async (req, res) => {
   const { url, path: outputPath } = req.body;
+  if (!enforceA2ATool(req, res, 'screenshot')) return;
+  if (url && !enforceA2ADomain(req, res, url, 'screenshot')) return;
 
   // If URL provided, navigate first; otherwise use current page
   if (url) {
@@ -1258,6 +1423,7 @@ app.post('/screenshot', async (req, res) => {
   }
 
   try {
+    if (!enforceA2ADomain(req, res, currentPage.url(), 'screenshot')) return;
     if (outputPath) {
       // Save to file
       await currentPage.screenshot({ path: outputPath });
@@ -1284,6 +1450,10 @@ app.post('/click', async (req, res) => {
   if (!currentPage) {
     return res.json({ error: 'No page open. Call /navigate first' });
   }
+  if (!enforceA2ATool(req, res, 'type')) return;
+  if (!enforceA2ADomain(req, res, currentPage.url(), 'type')) return;
+  if (!enforceA2ATool(req, res, 'click')) return;
+  if (!enforceA2ADomain(req, res, currentPage.url(), 'click')) return;
 
   try {
     // Try semantic search first, fall back to CSS selector
@@ -1371,6 +1541,8 @@ app.post('/type-secret', (req, res) => {
 // Form submission (with sensitive data check)
 app.post('/submit-form', async (req, res) => {
   const { url, formData, selector } = req.body;
+  if (!enforceA2ATool(req, res, 'submit_form')) return;
+  if (!enforceA2ADomain(req, res, url, 'submit_form')) return;
 
   // Full security check
   const secCheck = await fullSecurityCheck(url);
@@ -1450,6 +1622,8 @@ app.post('/secure/navigate', async (req, res) => {
   if (!ensureSecureLaneEnabled(res)) return;
   const { url } = req.body;
   if (!url) return res.json({ error: 'url required' });
+  if (!enforceA2ATool(req, res, 'secure_navigate')) return;
+  if (!enforceA2ADomain(req, res, url, 'secure_navigate')) return;
 
   const guard = checkSecureUrl(url);
   if (!guard.ok) {
@@ -1563,6 +1737,8 @@ app.post('/secure/close', async (req, res) => {
 app.post('/secure/screenshot', async (req, res) => {
   if (!ensureSecureLaneEnabled(res)) return;
   const { url, path: outputPath } = req.body;
+  if (!enforceA2ATool(req, res, 'secure_screenshot')) return;
+  if (url && !enforceA2ADomain(req, res, url, 'secure_screenshot')) return;
 
   if (url) {
     const guard = checkSecureUrl(url);
@@ -1591,6 +1767,7 @@ app.post('/secure/screenshot', async (req, res) => {
   if (!page) return;
 
   try {
+    if (!enforceA2ADomain(req, res, page.url(), 'secure_screenshot')) return;
     if (outputPath) {
       await page.screenshot({ path: outputPath });
       guardian.logAction('secure-screenshot', { path: outputPath }, 'safe', false);
@@ -1611,6 +1788,8 @@ app.post('/secure/click', async (req, res) => {
 
   const page = ensureSecurePage(res);
   if (!page) return;
+  if (!enforceA2ATool(req, res, 'secure_click')) return;
+  if (!enforceA2ADomain(req, res, page.url(), 'secure_click')) return;
 
   const guard = checkSecureRequestUrl(page.url());
   if (!guard.ok) {
@@ -1677,6 +1856,8 @@ app.post('/secure/type', async (req, res) => {
 
   const page = ensureSecurePage(res);
   if (!page) return;
+  if (!enforceA2ATool(req, res, 'secure_type')) return;
+  if (!enforceA2ADomain(req, res, page.url(), 'secure_type')) return;
 
   const guard = checkSecureRequestUrl(page.url());
   if (!guard.ok) {
@@ -1709,6 +1890,8 @@ app.post('/secure/submit-form', async (req, res) => {
   if (!ensureSecureLaneEnabled(res)) return;
   const { url, formData, selector } = req.body;
   if (!url || !formData) return res.json({ error: 'url and formData required' });
+  if (!enforceA2ATool(req, res, 'secure_submit_form')) return;
+  if (!enforceA2ADomain(req, res, url, 'secure_submit_form')) return;
 
   const guard = checkSecureUrl(url);
   if (!guard.ok) return res.json({ blocked: true, reason: guard.error });
@@ -1798,6 +1981,8 @@ app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (re
     allowPrivate
   } = req.body || {};
 
+  if (!enforceA2ATool(req, res, 'remote_start')) return;
+
   if (remoteSessions.size >= REMOTE_VIEW_MAX_SESSIONS) {
     return res.status(429).json({ error: 'Too many remote sessions' });
   }
@@ -1820,6 +2005,7 @@ app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (re
       });
     }
     if (startUrl) {
+      if (!enforceA2ADomain(req, res, startUrl, 'remote_start')) return;
       const guard = checkAllowedUrl(
         startUrl,
         effectiveAllowed.map(s => s.toLowerCase()),
@@ -1830,6 +2016,7 @@ app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (re
         return res.json({ blocked: true, reason: guard.error });
       }
     }
+    if (!enforceA2ADomainList(req, res, effectiveAllowed, 'remote_start')) return;
     try {
       const vaultStart = await vaultClient.send('browserRemoteStart', {
         startUrl,
@@ -1854,6 +2041,7 @@ app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (re
     if (!page) {
       return res.json({ error: `No ${lane} page open` });
     }
+    if (!enforceA2ADomain(req, res, page.url(), 'remote_start')) return;
   }
 
   const started = startRemoteSession({
@@ -1879,6 +2067,7 @@ app.post('/remote/start', requireVaultAdmin, requireRemoteViewEnabled, async (re
 app.post('/remote/stop', requireVaultAdmin, requireRemoteViewEnabled, async (req, res) => {
   const { sessionId } = req.body || {};
   if (!sessionId) return res.json({ error: 'sessionId required' });
+  if (!enforceA2ATool(req, res, 'remote_stop')) return;
   closeRemoteSession(sessionId, 'stopped');
   res.json({ success: true });
 });
@@ -2226,6 +2415,9 @@ app.post('/vault/proxy', async (req, res) => {
     });
   }
 
+  if (!enforceA2ATool(req, res, 'vault_proxy')) return;
+  if (!enforceA2ADomain(req, res, request.url, 'vault_proxy')) return;
+
   const result = await vaultClient.send('proxy', {
     secretName,
     request,
@@ -2271,6 +2463,9 @@ app.post('/vault/browser/execute', async (req, res) => {
   const effectiveAllowedDomains = Array.isArray(allowedDomains) && allowedDomains.length
     ? allowedDomains
     : SECURE_ALLOWED_DOMAINS;
+
+  if (!enforceA2ATool(req, res, 'vault_browser_execute')) return;
+  if (!enforceA2ADomainList(req, res, effectiveAllowedDomains, 'vault_browser_execute')) return;
 
   if (!effectiveAllowedDomains.length) {
     return res.json({
@@ -2480,11 +2675,16 @@ app.get('/audit-log', (req, res) => {
 app.get('/security-stats', (req, res) => {
   res.json({
     guardian: guardian.getStats(),
+    a2a: getA2AStats(),
     rateLimit: rateLimiter.getStats(),
     resources: resourceMonitor.getStats(),
     threatIntel: threatIntel.getStats(),
     threatIntelCache: threatIntel.getCacheStats()
   });
+});
+
+app.get('/a2a/stats', (req, res) => {
+  res.json(getA2AStats());
 });
 
 // Direct threat DB check
@@ -3118,6 +3318,8 @@ app.post('/fast/open', async (req, res) => {
 
   const { url } = req.body;
   if (!url) return res.json({ error: 'url required' });
+  if (!enforceA2ATool(req, res, 'fast_open')) return;
+  if (!enforceA2ADomain(req, res, url, 'fast_open')) return;
 
   const result = await fastBrowser.open(url);
   if (result.success) {
@@ -3143,6 +3345,16 @@ app.post('/fast/click', async (req, res) => {
 
   const pageData = fastBrowser._activePages?.get(pageId);
   if (!pageData) return res.json({ error: 'Page not found' });
+  if (!enforceA2ATool(req, res, 'fast_screenshot')) return;
+  if (!enforceA2ADomain(req, res, pageData.page?.url?.(), 'fast_screenshot')) return;
+  if (!enforceA2ATool(req, res, 'fast_dom')) return;
+  if (!enforceA2ADomain(req, res, pageData.page?.url?.(), 'fast_dom')) return;
+  if (!enforceA2ATool(req, res, 'fast_get_text')) return;
+  if (!enforceA2ADomain(req, res, pageData.page?.url?.(), 'fast_get_text')) return;
+  if (!enforceA2ATool(req, res, 'fast_type')) return;
+  if (!enforceA2ADomain(req, res, pageData.page?.url?.(), 'fast_type')) return;
+  if (!enforceA2ATool(req, res, 'fast_click')) return;
+  if (!enforceA2ADomain(req, res, pageData.page?.url?.(), 'fast_click')) return;
 
   const result = await fastBrowser.click(pageData.page, target, { waitForNavigation });
   res.json(result);
@@ -3205,6 +3417,7 @@ app.post('/fast/close', async (req, res) => {
 
   const pageData = fastBrowser._activePages?.get(pageId);
   if (!pageData) return res.json({ error: 'Page not found' });
+  if (!enforceA2ATool(req, res, 'fast_close')) return;
 
   await pageData.release();
   fastBrowser._activePages.delete(pageId);
@@ -3221,6 +3434,8 @@ app.post('/fast/login', async (req, res) => {
 
   const { url, email, username, password } = req.body;
   if (!url || !password) return res.json({ error: 'url and password required' });
+  if (!enforceA2ATool(req, res, 'fast_login')) return;
+  if (!enforceA2ADomain(req, res, url, 'fast_login')) return;
 
   const result = await fastBrowser.login(url, { email, username, password });
 
@@ -3256,7 +3471,11 @@ async function main() {
     console.warn('[Sakaki-Browser] Secure lane disabled (SAKAKI_SECURE_ALLOWED_DOMAINS not set).');
   }
 
-  await initBrowser();
+  if (SKIP_BROWSER_INIT) {
+    console.warn('[Sakaki-Browser] SAKAKI_SKIP_BROWSER_INIT=1 (browser not initialized).');
+  } else {
+    await initBrowser();
+  }
 
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server, path: '/remote/ws' });

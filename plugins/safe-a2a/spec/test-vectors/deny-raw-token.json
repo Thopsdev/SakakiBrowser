@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "ver": "sakai:safety-envelope/1",
+    "iss": "agent:sakai://orchestrator",
+    "aud": "agent:sakai://worker/search",
+    "iat": "2026-02-14T12:00:00Z",
+    "exp": "2026-02-14T12:10:00Z",
+    "nonce": "b64url:nonce7890",
+    "trace_id": "trc_01HT",
+    "purpose": "research.compile_brief",
+    "classification": "VAULT",
+    "data_tags": ["AUTH"],
+    "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sig": {
+      "alg": "EdDSA",
+      "kid": "local:test",
+      "value": "b64url:signature"
+    }
+  },
+  "payload": "sk-test-should-not-be-here",
+  "expected": "deny",
+  "reason_codes": ["DLP_DETECTED_AUTH", "VAULT_REQUIRED"]
+}

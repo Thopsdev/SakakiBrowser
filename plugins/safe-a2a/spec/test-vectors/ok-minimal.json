@@ -1,0 +1,21 @@
+{
+  "envelope": {
+    "ver": "sakai:safety-envelope/1",
+    "iss": "agent:sakai://orchestrator",
+    "aud": "agent:sakai://worker/search",
+    "iat": "2026-02-14T12:00:00Z",
+    "exp": "2026-02-14T12:10:00Z",
+    "nonce": "b64url:nonce123456",
+    "trace_id": "trc_01HT",
+    "purpose": "research.compile_brief",
+    "classification": "PUBLIC",
+    "payload_hash": "sha256:4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b",
+    "sig": {
+      "alg": "EdDSA",
+      "kid": "local:test",
+      "value": "b64url:signature"
+    }
+  },
+  "payload": "hello world",
+  "expected": "allow"
+}

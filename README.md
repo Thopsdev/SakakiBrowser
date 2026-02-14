@@ -150,8 +150,38 @@ npm start
   - Input: `SAKAKI_REMOTE_VIEW_ALLOW_TEXT=1`, `SAKAKI_REMOTE_VIEW_ALLOW_SCROLL=1`
   - Sensitive block: `SAKAKI_REMOTE_VIEW_BLOCK_SENSITIVE=1` (default on)
   - Vault lane: `/remote/start` with `"lane":"vault"` + `allowedDomains` + `startUrl`
+- API-only mode:
+  - `SAKAKI_SKIP_BROWSER_INIT=1` (useful for A2A guard / Vault proxy only)
+- Safe A2A rail (optional):
+  - Enable: `SAKAKI_A2A_ENABLE=1`
+  - Mode: `SAKAKI_A2A_MODE=strict` (or `vault_only`)
+  - Shared secret: `SAKAKI_A2A_SHARED_SECRET`
+  - Purposes allowlist: `SAKAKI_A2A_ALLOWED_PURPOSES=...`
+  - Receiver: `SAKAKI_A2A_RECEIVER_AUD=...`
+  - Domain allowlist is enforced via the envelope `constraints.allowed_domains`
+  - Protected paths: `SAKAKI_A2A_PROTECTED_PATHS=/navigate,/click,/type,/secure,/fast,/vault/proxy,/vault/browser/execute,/remote`
 
 Production template: `docs/production.env.example`.
+
+## A2A 1-Minute Example
+
+1. Enable Safe A2A
+```
+export SAKAKI_A2A_ENABLE=1
+export SAKAKI_A2A_MODE=strict
+export SAKAKI_A2A_SHARED_SECRET=change-me
+export SAKAKI_A2A_ALLOWED_PURPOSES=research.compile_brief
+```
+
+2. Start Sakaki Browser
+```
+npm start
+```
+
+3. Send a signed request
+```
+node plugins/safe-a2a/examples/send-navigate.js
+```
 
 ## Reverse Proxy (TLS)
 
@@ -616,6 +646,7 @@ await fastBrowser.click('login_button');
 | `/detect-sensitive` | POST | Detect sensitive data |
 | `/scan/file` | POST | Antivirus scan |
 | `/audit-log` | GET | Get operation log |
+| `/a2a/stats` | GET | A2A guard metrics |
 | `/health` | GET | Health check |
 
 ---
@@ -646,6 +677,12 @@ await fastBrowser.click('login_button');
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Plugins
+
+- Safe A2A rail: `plugins/safe-a2a/README.md`
 
 ---
 

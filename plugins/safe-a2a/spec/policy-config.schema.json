@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sakaki.dev/specs/policy-config.schema.json",
+  "title": "Safe A2A Policy Config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["default", "strict", "vault_only"]
+    },
+    "max_ttl_sec": { "type": "integer", "minimum": 30 },
+    "max_clock_skew_sec": { "type": "integer", "minimum": 0 },
+    "require_allowlist": { "type": "boolean" },
+    "allowed_purposes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "trusted_kids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "replay_window_sec": { "type": "integer", "minimum": 30 },
+    "dlp_mode": { "type": "string", "enum": ["warn", "deny"] },
+    "audit_mode": { "type": "string", "enum": ["metadata", "none"] }
+  }
+}

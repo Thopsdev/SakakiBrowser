@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sakaki.dev/specs/safety-envelope-v1.schema.json",
+  "title": "Safety Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ver",
+    "iss",
+    "aud",
+    "iat",
+    "exp",
+    "nonce",
+    "trace_id",
+    "purpose",
+    "classification",
+    "payload_hash",
+    "sig"
+  ],
+  "properties": {
+    "ver": {
+      "const": "sakai:safety-envelope/1"
+    },
+    "iss": {
+      "type": "string",
+      "minLength": 3
+    },
+    "aud": {
+      "type": "string",
+      "minLength": 3
+    },
+    "iat": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "exp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 8
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 6
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 3
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "classification": {
+      "type": "string",
+      "enum": ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "VAULT"]
+    },
+    "data_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_usd": { "type": "number", "minimum": 0 },
+        "max_calls": { "type": "integer", "minimum": 1 },
+        "max_output_chars": { "type": "integer", "minimum": 1 },
+        "allowed_domains": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "disallowed_actions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "vault_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "token"],
+        "properties": {
+          "type": { "const": "vault_wrap" },
+          "token": { "type": "string", "minLength": 10 },
+          "hint": { "type": "string" },
+          "ttl_sec": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[a-f0-9]{32,}$"
+    },
+    "sig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alg", "kid", "value"],
+      "properties": {
+        "alg": { "type": "string" },
+        "kid": { "type": "string" },
+        "value": { "type": "string", "minLength": 16 }
+      }
+    }
+  }
+}
