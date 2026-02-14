@@ -679,28 +679,29 @@ await fastBrowser.click('login_button');
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
-│                      Sakaki Browser                          │
+│                     Sakaki Browser                          │
 ├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │   Browser    │    │   Guardian   │    │   Antivirus  │  │
-│  │    Pool      │    │  (audit)     │    │   Scanner    │  │
-│  └──────────────┘    └──────────────┘    └──────────────┘  │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │  Semantic    │    │   WebSocket  │    │   Webhook    │  │
-│  │   Finder     │    │    Proxy     │    │   Receiver   │  │
-│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │   Browser    │  │   Guardian   │  │  Antivirus   │       │
+│  │    Pool      │  │ (audit+pol)  │  │   Scanner    │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │  Semantic    │  │  WebSocket   │  │   Webhook    │       │
+│  │   Finder     │  │    Proxy     │  │  Receiver    │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
 ├─────────────────────────────────────────────────────────────┤
-│                    Unix Socket IPC                           │
+│                    Unix Socket IPC                          │
 ├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                  Vault Process                        │  │
-│  │   • Complete process isolation                        │  │
-│  │   • No public retrieve API (verify-only)              │  │
-│  │   • Proxy injects secrets internally                  │  │
-│  │   • BLAKE3 + SecureBuffer (auto-zeroing)              │  │
-│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                  Vault Process                        │   │
+│  │ • Process isolation                                    │   │
+│  │ • No public retrieve (verify-only)                     │   │
+│  │ • Proxy injects secrets internally                     │   │
+│  │ • Vault-signed requests (HMAC)                         │   │
+│  │ • BLAKE3 + SecureBuffer (auto-zeroing)                 │   │
+│  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
