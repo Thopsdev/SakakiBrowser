@@ -36,86 +36,103 @@ async function fetchJson(pathname, body, options = {}) {
   return { status: res.status, data };
 }
 
+async function stopChild(child) {
+  if (!child) return;
+  if (child.exitCode !== null) return;
+  try {
+    child.kill('SIGTERM');
+  } catch {}
+  await sleep(200);
+  if (child.exitCode === null) {
+    try {
+      child.kill('SIGKILL');
+    } catch {}
+  }
+}
+
 async function run() {
-  const child = spawn('node', ['src/index.js'], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env,
-      PORT: String(PORT),
-      SAKAKI_BIND: '127.0.0.1',
-      SAKAKI_ADMIN_TOKEN: ADMIN_TOKEN,
-      SAKAKI_MODE: 'strict',
-      SAKAKI_SKIP_BROWSER_INIT: '1',
-      SAKAKI_PUBLIC_ALLOW_HTTP: '1',
-      SAKAKI_SECURE_ALLOW_HTTP: '1',
-      SAKAKI_SECURE_ALLOW_PRIVATE: '1',
-      SAKAKI_SECURE_ALLOW_SENSITIVE: '1',
-      SAKAKI_VAULT_BROWSER_ALLOW_HTTP: '1',
-      SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE: '1',
-      SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE: '1',
-      SAKAKI_PROXY_ALLOW_HTTP: '1',
-      SAKAKI_PROXY_ALLOW_PRIVATE: '1',
-      SAKAKI_PROXY_REQUIRE_ALLOWLIST: '0'
-    },
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  let child;
+  try {
+    child = spawn('node', ['src/index.js'], {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        SAKAKI_BIND: '127.0.0.1',
+        SAKAKI_ADMIN_TOKEN: ADMIN_TOKEN,
+        SAKAKI_MODE: 'strict',
+        SAKAKI_SKIP_BROWSER_INIT: '1',
+        SAKAKI_PUBLIC_ALLOW_HTTP: '1',
+        SAKAKI_SECURE_ALLOW_HTTP: '1',
+        SAKAKI_SECURE_ALLOW_PRIVATE: '1',
+        SAKAKI_SECURE_ALLOW_SENSITIVE: '1',
+        SAKAKI_VAULT_BROWSER_ALLOW_HTTP: '1',
+        SAKAKI_VAULT_BROWSER_ALLOW_PRIVATE: '1',
+        SAKAKI_VAULT_BROWSER_ALLOW_SENSITIVE: '1',
+        SAKAKI_PROXY_ALLOW_HTTP: '1',
+        SAKAKI_PROXY_ALLOW_PRIVATE: '1',
+        SAKAKI_PROXY_REQUIRE_ALLOWLIST: '0'
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
 
-  child.stdout.on('data', (d) => process.stdout.write(d));
-  child.stderr.on('data', (d) => process.stderr.write(d));
+    child.stdout.on('data', (d) => process.stdout.write(d));
+    child.stderr.on('data', (d) => process.stderr.write(d));
 
-  const healthy = await waitForHealth();
-  if (!healthy) {
-    child.kill('SIGKILL');
-    throw new Error('Sakaki server failed to start');
-  }
+    const healthy = await waitForHealth();
+    if (!healthy) {
+      throw new Error('Sakaki server failed to start');
+    }
 
-  const adminHeaders = { Authorization: `Bearer ${ADMIN_TOKEN}` };
-  const init = await fetchJson('/vault/init', { masterKey: MASTER_KEY }, { headers: adminHeaders });
-  if (!init.data || init.data.success !== true) {
-    throw new Error(`Vault init failed: ${JSON.stringify(init.data)}`);
-  }
+    const adminHeaders = { Authorization: `Bearer ${ADMIN_TOKEN}` };
+    const init = await fetchJson('/vault/init', { masterKey: MASTER_KEY }, { headers: adminHeaders });
+    if (!init.data || init.data.success !== true) {
+      throw new Error(`Vault init failed: ${JSON.stringify(init.data)}`);
+    }
 
-  const typeRes = await fetchJson('/type', {
-    selector: '#input',
-    text: 'api_key=sk-test-1234567890abcdef'
-  });
-  if (!typeRes.data || typeRes.data.blocked !== true) {
-    throw new Error('Strict mode did not block sensitive /type input');
-  }
+    const typeRes = await fetchJson('/type', {
+      selector: '#input',
+      text: 'api_key=sk-test-1234567890abcdef'
+    });
+    if (!typeRes.data || typeRes.data.blocked !== true) {
+      throw new Error('Strict mode did not block sensitive /type input');
+    }
 
-  const typeSecretRes = await fetch(`http://127.0.0.1:${PORT}/type-secret`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
-  });
-  if (typeSecretRes.status !== 410) {
-    throw new Error('/type-secret should return 410');
-  }
-
-  const proxyRes = await fetchJson('/vault/proxy', {
-    secretName: 'MISSING',
-    request: {
+    const typeSecretRes = await fetch(`http://127.0.0.1:${PORT}/type-secret`, {
       method: 'POST',
-      url: 'https://example.com',
       headers: { 'Content-Type': 'application/json' },
-      body: { ping: 'pong' }
-    },
-    injectAs: 'Authorization: Bearer ${secret}'
-  }, { headers: adminHeaders });
-  if (!proxyRes.data || !String(proxyRes.data.error || '').toLowerCase().includes('allowlist')) {
-    throw new Error('Strict mode did not enforce proxy allowlist');
-  }
+      body: JSON.stringify({})
+    });
+    if (typeSecretRes.status !== 410) {
+      throw new Error('/type-secret should return 410');
+    }
 
-  const configRes = await fetchJson('/vault/proxy/config', {
-    enabled: false,
-    enforceVaultProxy: false
-  }, { headers: adminHeaders });
-  if (!configRes.data || configRes.data.success !== false) {
-    throw new Error('Strict mode allowed proxy config relaxation');
-  }
+    const proxyRes = await fetchJson('/vault/proxy', {
+      secretName: 'MISSING',
+      request: {
+        method: 'POST',
+        url: 'https://example.com',
+        headers: { 'Content-Type': 'application/json' },
+        body: { ping: 'pong' }
+      },
+      injectAs: 'Authorization: Bearer ${secret}'
+    }, { headers: adminHeaders });
+    if (!proxyRes.data || !String(proxyRes.data.error || '').toLowerCase().includes('allowlist')) {
+      throw new Error('Strict mode did not enforce proxy allowlist');
+    }
 
-  child.kill('SIGTERM');
-  console.log('[STRICT] OK');
+    const configRes = await fetchJson('/vault/proxy/config', {
+      enabled: false,
+      enforceVaultProxy: false
+    }, { headers: adminHeaders });
+    if (!configRes.data || configRes.data.success !== false) {
+      throw new Error('Strict mode allowed proxy config relaxation');
+    }
+
+    console.log('[STRICT] OK');
+  } finally {
+    await stopChild(child);
+  }
 }
 
 run().catch((err) => {

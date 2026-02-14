@@ -57,8 +57,10 @@ For internal automation (e.g., form fill), a controlled internal retrieval is us
 ```javascript
 // Enforce Vault-only access
 app.use(createVaultVerificationMiddleware({
+  signingKey: process.env.VAULT_SIGNING_KEY,
+  publicKeyId: 'vault-key-id',
   enforceVaultProxy: true,  // Reject requests not from Vault
-  allowedKeyIds: ['user-123', 'user-456']
+  allowedProxyNames: ['sakaki-vault']
 }));
 // X-Vault-Signature header automatically verified
 ```
