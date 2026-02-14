@@ -160,7 +160,7 @@ npm start
   - Shared secret: `SAKAKI_A2A_SHARED_SECRET`
   - Purposes allowlist: `SAKAKI_A2A_ALLOWED_PURPOSES=...`
   - Receiver: `SAKAKI_A2A_RECEIVER_AUD=...`
-  - Domain allowlist is enforced via the envelope `constraints.allowed_domains`
+  - Domain allowlist is enforced via the envelope `constraints.allowed_domains` (exact match; use `*.example.com` for subdomains)
   - Protected paths: `SAKAKI_A2A_PROTECTED_PATHS=/navigate,/click,/type,/secure,/fast,/vault/proxy,/vault/browser/execute,/remote`
 
 Production template: `docs/production.env.example`.

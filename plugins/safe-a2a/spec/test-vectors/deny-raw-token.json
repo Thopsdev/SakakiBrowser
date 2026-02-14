@@ -9,15 +9,21 @@
     "trace_id": "trc_01HT",
     "purpose": "research.compile_brief",
     "classification": "VAULT",
-    "data_tags": ["AUTH"],
-    "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "data_tags": [
+      "AUTH"
+    ],
+    "payload_hash": "sha256:3f257c57b61eabcd4e4c1c4d25179424e198929029caf3d1c57a2a07c553ae66",
     "sig": {
-      "alg": "EdDSA",
+      "alg": "hmac-sha256",
       "kid": "local:test",
-      "value": "b64url:signature"
+      "value": "hex:02e64d29f2c4735062a4a7bcae1f576c41057170065f7bf0fc58cc74950fc024"
     }
   },
   "payload": "sk-test-should-not-be-here",
   "expected": "deny",
-  "reason_codes": ["DLP_DETECTED_AUTH", "VAULT_REQUIRED"]
+  "reason_codes": [
+    "DLP_DENY",
+    "DLP_DETECTED_AUTH",
+    "VAULT_REQUIRED"
+  ]
 }

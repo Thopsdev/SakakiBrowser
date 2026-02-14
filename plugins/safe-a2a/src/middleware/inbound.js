@@ -1,5 +1,5 @@
 const { detectSensitive } = require('./dlp');
-const { verifySignature } = require('./crypto');
+const { verifySignature, computePayloadHash, payloadHashMatches } = require('./crypto');
 const { buildAuditEvent, emitAudit } = require('./audit');
 const { requiresVault, hasVaultRefs } = require('./vault');
 const { createNonceStore } = require('./replay');
@@ -80,18 +80,32 @@ async function inboundGuard(ctx, config) {
 
   const nonceStore = config.nonce_store || (defaultNonceStore || (defaultNonceStore = createNonceStore(config.replay_window_sec)));
   if (envelope) {
-    const nonceResult = nonceStore.check(envelope.nonce, envelope.exp);
+    const nonceKey = `${envelope.iss || ''}:${envelope.aud || ''}:${envelope.nonce || ''}`;
+    const nonceResult = nonceStore.check(nonceKey, envelope.exp);
     if (!nonceResult.ok) {
       reasons.push(nonceResult.reason);
     }
   }
 
+  const payloadHash = computePayloadHash(ctx.payload);
+  if (envelope && envelope.payload_hash && !payloadHashMatches(envelope.payload_hash, payloadHash)) {
+    reasons.push('PAYLOAD_HASH_MISMATCH');
+  }
+
   const dlp = detectSensitive(ctx.payload);
-  if (requiresVault(envelope, dlp, ctx.payload, config)) {
+  const warnings = [];
+  if (dlp.found) {
+    if (config.dlp_mode === 'deny') {
+      reasons.push('DLP_DENY', ...dlp.reasons);
+    } else if (config.dlp_mode === 'warn') {
+      warnings.push(...dlp.reasons);
+    }
+  }
+
+  if (requiresVault(envelope, ctx.payload, config)) {
     if (!hasVaultRefs(envelope)) {
       reasons.push('VAULT_REQUIRED');
     }
-    reasons.push(...dlp.reasons);
   }
 
   const sigResult = envelope ? await verifySignature(envelope, config) : { ok: false, reason: 'SIG_MISSING' };
@@ -104,7 +118,9 @@ async function inboundGuard(ctx, config) {
     direction: 'inbound',
     decision: allowed ? 'allow' : 'deny',
     reasons,
-    envelope
+    envelope,
+    payloadHash,
+    warnings
   });
   emitAudit(audit, config);
 

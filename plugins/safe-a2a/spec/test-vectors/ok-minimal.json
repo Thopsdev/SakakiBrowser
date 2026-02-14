@@ -9,11 +9,11 @@
     "trace_id": "trc_01HT",
     "purpose": "research.compile_brief",
     "classification": "PUBLIC",
-    "payload_hash": "sha256:4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b4c3b",
+    "payload_hash": "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
     "sig": {
-      "alg": "EdDSA",
+      "alg": "hmac-sha256",
       "kid": "local:test",
-      "value": "b64url:signature"
+      "value": "hex:e5e75f562083087e7f8100cc96200cf4ef8af73da5e837b59dcc064f14335d57"
     }
   },
   "payload": "hello world",

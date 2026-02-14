@@ -1,9 +1,10 @@
-function buildAuditEvent({ direction, decision, reasons, envelope, payloadHash }) {
+function buildAuditEvent({ direction, decision, reasons, envelope, payloadHash, warnings }) {
   return {
     ts: new Date().toISOString(),
     direction,
     decision,
     reason_codes: reasons || [],
+    warning_codes: warnings || [],
     trace_id: envelope && envelope.trace_id,
     iss: envelope && envelope.iss,
     aud: envelope && envelope.aud,

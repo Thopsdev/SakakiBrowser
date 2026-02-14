@@ -262,6 +262,19 @@ function getA2AAllowedDomains(req) {
   return list.map(normalizeHost).filter(Boolean);
 }
 
+function a2aDomainMatches(hostname, list) {
+  const host = normalizeHost(hostname);
+  if (!host) return false;
+  return list.some((rule) => {
+    if (!rule) return false;
+    if (rule.startsWith('*.')) {
+      const base = rule.slice(2);
+      return base && host.endsWith('.' + base);
+    }
+    return host === rule;
+  });
+}
+
 function enforceA2ATool(req, res, toolName) {
   const envelope = req?.a2aEnvelope;
   if (!envelope) return true;
@@ -317,7 +330,7 @@ function enforceA2ADomain(req, res, url, context) {
     });
     return false;
   }
-  if (!domainMatches(host, allowed)) {
+  if (!a2aDomainMatches(host, allowed)) {
     recordA2ABlock({ req, reason: 'A2A_DOMAIN_NOT_ALLOWED', host, context });
     res.status(403).json({
       error: 'A2A domain blocked',
@@ -345,7 +358,7 @@ function enforceA2ADomainList(req, res, domains, context) {
     return false;
   }
   const normalized = (domains || []).map(normalizeHost).filter(Boolean);
-  const invalid = normalized.filter((d) => !domainMatches(d, allowed));
+  const invalid = normalized.filter((d) => !a2aDomainMatches(d, allowed));
   if (invalid.length > 0) {
     recordA2ABlock({ req, reason: 'A2A_DOMAIN_NOT_ALLOWED', host: invalid[0], context });
     res.status(403).json({

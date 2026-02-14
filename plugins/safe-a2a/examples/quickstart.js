@@ -1,30 +1,12 @@
 const crypto = require('crypto');
 const { createSafeA2A } = require('../src');
+const { canonicalizeEnvelope, computePayloadHash } = require('../src/middleware/crypto');
 
 const SHARED_SECRET = 'dev-secret-change-me';
 
-function buildSignaturePayload(env) {
-  return [
-    env.ver,
-    env.iss,
-    env.aud,
-    env.iat,
-    env.exp,
-    env.nonce,
-    env.trace_id,
-    env.purpose,
-    env.classification,
-    env.payload_hash
-  ].join('\n');
-}
-
 function signEnvelope(env) {
-  const payload = buildSignaturePayload(env);
+  const payload = canonicalizeEnvelope(env);
   return crypto.createHmac('sha256', SHARED_SECRET).update(payload).digest('hex');
-}
-
-function hashPayload(payload) {
-  return 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex');
 }
 
 const safeA2A = createSafeA2A({
@@ -49,7 +31,7 @@ const envelope = {
   trace_id: 'trc_quickstart',
   purpose: 'research.compile_brief',
   classification: 'PUBLIC',
-  payload_hash: hashPayload(payload),
+  payload_hash: computePayloadHash(payload),
   sig: { alg: 'hmac-sha256', kid: 'local:test', value: '' },
   constraints: { allowed_domains: ['example.com'], allowed_tools: ['http_fetch'] }
 };

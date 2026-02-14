@@ -22,7 +22,7 @@ SAKAKI_A2A_SHARED_SECRET=change-me
 SAKAKI_A2A_ALLOWED_PURPOSES=research.compile_brief
 SAKAKI_A2A_RECEIVER_AUD=agent:sakai://worker/search
 
-# Allowlist for Secure/Vault lanes
+# Allowlist for Secure/Vault lanes (use *.example.com to allow subdomains)
 SAKAKI_SECURE_ALLOWED_DOMAINS=example.com,login.example.com
 ```
 

@@ -18,7 +18,7 @@ function hasPayload(payload) {
   return true;
 }
 
-function requiresVault(envelope, dlpResult, payload, config) {
+function requiresVault(envelope, payload, config) {
   if (!envelope || envelope.classification !== 'VAULT') {
     return false;
   }
@@ -26,7 +26,7 @@ function requiresVault(envelope, dlpResult, payload, config) {
   if ((mode === 'strict' || mode === 'vault_only') && hasPayload(payload)) {
     return true;
   }
-  return dlpResult && dlpResult.found;
+  return false;
 }
 
 module.exports = {

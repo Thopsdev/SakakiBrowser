@@ -5,23 +5,20 @@
     "aud": "agent:sakai://worker/search",
     "iat": "2026-02-14T12:00:00Z",
     "exp": "2026-02-14T12:10:00Z",
-    "nonce": "b64url:nonce-vault",
+    "nonce": "b64url:nonce-mismatch",
     "trace_id": "trc_01HT",
     "purpose": "research.compile_brief",
-    "classification": "VAULT",
-    "data_tags": [
-      "PII"
-    ],
-    "payload_hash": "sha256:452a3e76e0e8261229fb338056808bbbed2e6c519df085126339f4e7b12536c3",
+    "classification": "PUBLIC",
+    "payload_hash": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
     "sig": {
       "alg": "hmac-sha256",
       "kid": "local:test",
-      "value": "hex:d9412bf85981f016261e4ca9866329638e925cf4595a3cf90a78c5123b5707e7"
+      "value": "hex:7ed98610bd83c0469d761f6fd26744e1fa0cfdbd246391e11f2cf383e2b4fa11"
     }
   },
-  "payload": "John Doe, 123 Main St",
+  "payload": "goodbye",
   "expected": "deny",
   "reason_codes": [
-    "VAULT_REQUIRED"
+    "PAYLOAD_HASH_MISMATCH"
   ]
 }

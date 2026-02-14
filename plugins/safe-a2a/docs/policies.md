@@ -19,7 +19,7 @@ Inbound Rules
 Strict Mode
 - Enforce allowlist for all outbound proxy calls
 - Require vault_refs when classification is VAULT and payload is non-empty
-- Deny any raw secret when classification is VAULT
+- Deny any raw secret regardless of classification (DLP deny)
 - Require data_tags for CONFIDENTIAL and VAULT
 
 Vault Only Mode

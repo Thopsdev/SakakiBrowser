@@ -51,16 +51,16 @@ SAKAKI_A2A_RECEIVER_AUD=agent:sakai://worker/search
 ```
 \"constraints\": { \"allowed_domains\": [\"example.com\"] }
 ```
+Exact match is the default. Use `*.example.com` to allow subdomains.
 
 3. Signature (HMAC-SHA256)
 ```
-payload = [
-  ver, iss, aud, iat, exp, nonce, trace_id, purpose, classification, payload_hash
-].join(\"\\n\")
+payload = canonical_json(envelope_without_sig_value)
 
 sig.alg = \"hmac-sha256\"
 sig.value = hex(hmac_sha256(SAKAKI_A2A_SHARED_SECRET, payload))
 ```
+`payload_hash` should be `sha256` of the payload (canonical JSON for objects), formatted as `sha256:<hex>`.
 
 Envelope Example
 ```json
@@ -92,9 +92,9 @@ Envelope Example
   ],
   "payload_hash": "sha256:4c3b...",
   "sig": {
-    "alg": "EdDSA",
-    "kid": "vault:key/sakai-a2a-signing#2026-01",
-    "value": "b64url:MEQCIF..."
+    "alg": "hmac-sha256",
+    "kid": "local:test",
+    "value": "hex:..."
   }
 }
 ```

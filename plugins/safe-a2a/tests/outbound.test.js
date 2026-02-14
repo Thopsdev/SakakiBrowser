@@ -1,7 +1,9 @@
 const assert = require('assert');
 const { outboundGuard } = require('../src/middleware/outbound');
+const { computePayloadHash } = require('../src/middleware/crypto');
 
 (async () => {
+  const payload = 'hello';
   const envelope = {
     ver: 'sakai:safety-envelope/1',
     iss: 'agent:sakai://orchestrator',
@@ -12,8 +14,8 @@ const { outboundGuard } = require('../src/middleware/outbound');
     trace_id: 'trc_test',
     purpose: 'research.compile_brief',
     classification: 'PUBLIC',
-    payload_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    sig: { alg: 'EdDSA', kid: 'local:test', value: 'b64url:signature' },
+    payload_hash: computePayloadHash(payload),
+    sig: { alg: 'hmac-sha256', kid: 'local:test', value: 'hex:signature' },
     constraints: { allowed_domains: ['example.com'], allowed_tools: ['http_fetch'] }
   };
 
@@ -29,6 +31,6 @@ const { outboundGuard } = require('../src/middleware/outbound');
     verify_signature: async () => ({ ok: true })
   };
 
-  const res = await outboundGuard({ envelope, payload: 'hello' }, config);
+  const res = await outboundGuard({ envelope, payload }, config);
   assert.strictEqual(res.allowed, true);
 })();

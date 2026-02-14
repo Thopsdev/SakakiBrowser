@@ -17,19 +17,40 @@ function parseListValue(raw) {
   return raw.split(sep).map(s => s.trim()).filter(Boolean);
 }
 
+function stableStringify(value) {
+  if (value && typeof value.toJSON === 'function') {
+    return stableStringify(value.toJSON());
+  }
+  if (value === null) return 'null';
+  if (value === undefined) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
+  if (Buffer.isBuffer(value)) return JSON.stringify(value.toString('base64'));
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+    const pairs = keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`);
+    return `{${pairs.join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function canonicalizeEnvelope(envelope) {
+  if (!envelope || typeof envelope !== 'object') return '';
+  const clone = JSON.parse(JSON.stringify(envelope));
+  if (clone.sig && typeof clone.sig === 'object') {
+    delete clone.sig.value;
+    if (Object.keys(clone.sig).length === 0) {
+      delete clone.sig;
+    }
+  }
+  return stableStringify(clone);
+}
+
 function buildSignaturePayload(envelope) {
-  return [
-    envelope.ver,
-    envelope.iss,
-    envelope.aud,
-    envelope.iat,
-    envelope.exp,
-    envelope.nonce,
-    envelope.trace_id,
-    envelope.purpose,
-    envelope.classification,
-    envelope.payload_hash
-  ].join('\n');
+  return canonicalizeEnvelope(envelope);
 }
 
 function decodeSigValue(raw) {
@@ -48,7 +69,7 @@ function decodeSigValue(raw) {
   return Buffer.from(trimmed, 'base64');
 }
 
-function createSignatureVerifier(sharedSecret) {
+function createSignatureVerifier(sharedSecret, trustedKids = []) {
   return async (envelope) => {
     if (!sharedSecret) {
       return { ok: false, reason: 'SIG_SECRET_MISSING' };
@@ -58,6 +79,12 @@ function createSignatureVerifier(sharedSecret) {
     }
     if (String(envelope.sig.alg || '').toLowerCase() !== 'hmac-sha256') {
       return { ok: false, reason: 'SIG_ALG' };
+    }
+    if (trustedKids.length > 0) {
+      const kid = envelope.sig.kid;
+      if (!kid || !trustedKids.includes(kid)) {
+        return { ok: false, reason: 'SIG_KID_NOT_ALLOWED' };
+      }
     }
     const payload = buildSignaturePayload(envelope);
     const expected = crypto.createHmac('sha256', sharedSecret).update(payload).digest();
@@ -103,36 +130,52 @@ function buildPathMatcher(paths) {
 function createSafeA2ABridge(env, options = {}) {
   const { onBlock } = options;
   const enabled = env.SAKAKI_A2A_ENABLE === '1';
+  const protectedPaths = parseListValue(
+    env.SAKAKI_A2A_PROTECTED_PATHS ||
+    '/navigate,/click,/type,/secure,/fast,/vault/proxy,/vault/browser/execute,/remote'
+  );
+  const matchesPath = buildPathMatcher(protectedPaths);
+
   if (!enabled) {
     return { enabled: false, middleware: (req, res, next) => next() };
   }
 
   const mod = loadSafeA2A();
   if (!mod || typeof mod.createSafeA2A !== 'function') {
-    console.warn('[Sakaki-Browser] Safe A2A plugin missing createSafeA2A. Disabled.');
-    return { enabled: false, middleware: (req, res, next) => next() };
+    console.error('[Sakaki-Browser] Safe A2A plugin missing. Blocking protected paths.');
+    const middleware = (req, res, next) => {
+      if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+        return next();
+      }
+      if (!matchesPath(req.path || '')) {
+        return next();
+      }
+      if (typeof onBlock === 'function') {
+        onBlock({ req, reason: 'A2A_PLUGIN_MISSING', context: req.path });
+      }
+      return res.status(503).json({
+        error: 'A2A plugin unavailable',
+        reason: 'A2A_PLUGIN_MISSING'
+      });
+    };
+    return { enabled: true, middleware };
   }
 
   const sharedSecret = env.SAKAKI_A2A_SHARED_SECRET || '';
+  const trustedKids = parseListValue(env.SAKAKI_A2A_TRUSTED_KIDS || '');
   const safeA2A = mod.createSafeA2A({
     mode: env.SAKAKI_A2A_MODE || 'strict',
     max_ttl_sec: parseInt(env.SAKAKI_A2A_MAX_TTL_SEC || '600', 10),
     max_clock_skew_sec: parseInt(env.SAKAKI_A2A_MAX_CLOCK_SKEW_SEC || '30', 10),
     require_allowlist: env.SAKAKI_A2A_REQUIRE_ALLOWLIST !== '0',
     allowed_purposes: parseListValue(env.SAKAKI_A2A_ALLOWED_PURPOSES || ''),
-    trusted_kids: parseListValue(env.SAKAKI_A2A_TRUSTED_KIDS || ''),
+    trusted_kids: trustedKids,
     replay_window_sec: parseInt(env.SAKAKI_A2A_REPLAY_WINDOW_SEC || '600', 10),
     dlp_mode: env.SAKAKI_A2A_DLP_MODE || 'deny',
     audit_mode: env.SAKAKI_A2A_AUDIT_MODE || 'metadata',
     receiver_aud: env.SAKAKI_A2A_RECEIVER_AUD || '',
-    verify_signature: createSignatureVerifier(sharedSecret)
+    verify_signature: createSignatureVerifier(sharedSecret, trustedKids)
   });
-
-  const protectedPaths = parseListValue(
-    env.SAKAKI_A2A_PROTECTED_PATHS ||
-    '/navigate,/click,/type,/secure,/fast,/vault/proxy,/vault/browser/execute,/remote'
-  );
-  const matchesPath = buildPathMatcher(protectedPaths);
 
   const middleware = async (req, res, next) => {
     if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {

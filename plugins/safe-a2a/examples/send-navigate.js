@@ -1,36 +1,18 @@
 const crypto = require('crypto');
+const { canonicalizeEnvelope, computePayloadHash } = require('../src/middleware/crypto');
 
 const SERVER = process.env.SAKAKI_URL || 'http://127.0.0.1:18800';
 const SHARED_SECRET = process.env.SAKAKI_A2A_SHARED_SECRET || 'change-me';
 const TARGET_URL = process.env.SAKAKI_TARGET_URL || 'https://example.com';
 
-function sha256Hex(input) {
-  return crypto.createHash('sha256').update(input).digest('hex');
-}
-
-function buildSignaturePayload(env) {
-  return [
-    env.ver,
-    env.iss,
-    env.aud,
-    env.iat,
-    env.exp,
-    env.nonce,
-    env.trace_id,
-    env.purpose,
-    env.classification,
-    env.payload_hash
-  ].join('\n');
-}
-
 function signEnvelope(env) {
-  const payload = buildSignaturePayload(env);
+  const payload = canonicalizeEnvelope(env);
   return crypto.createHmac('sha256', SHARED_SECRET).update(payload).digest('hex');
 }
 
 async function main() {
   const payload = { url: TARGET_URL };
-  const payloadHash = 'sha256:' + sha256Hex(JSON.stringify(payload));
+  const payloadHash = computePayloadHash(payload);
 
   const envelope = {
     ver: 'sakai:safety-envelope/1',
