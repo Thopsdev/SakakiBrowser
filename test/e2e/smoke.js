@@ -4,8 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const SAKAKI_PORT = 18900;
-const TEST_PORT = 18901;
+const SAKAKI_PORT = Number(
+  process.env.SAKAKI_E2E_PORT || (18000 + Math.floor(Math.random() * 1000))
+);
+const TEST_PORT = Number(process.env.SAKAKI_E2E_TEST_PORT || 0);
 const ADMIN_TOKEN = 'e2e-token';
 const DEFAULT_CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
@@ -31,7 +33,7 @@ async function fetchJson(url, options = {}) {
   return { status: res.status, data };
 }
 
-function startTestServer() {
+function startTestServer(port) {
   const server = http.createServer((req, res) => {
     if (req.url === '/challenge') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -46,7 +48,11 @@ function startTestServer() {
     res.end('<html><body>ok</body></html>');
   });
   return new Promise((resolve) => {
-    server.listen(TEST_PORT, '127.0.0.1', () => resolve(server));
+    server.listen(port, '127.0.0.1', () => {
+      const address = server.address();
+      const effectivePort = address && typeof address === 'object' ? address.port : port;
+      resolve({ server, port: effectivePort });
+    });
   });
 }
 
@@ -62,7 +68,7 @@ async function waitForHealth() {
 }
 
 async function run() {
-  const testServer = await startTestServer();
+  const { server: testServer, port: testPort } = await startTestServer(TEST_PORT);
 
   const child = spawn('node', ['src/index.js'], {
     cwd: __dirname + '/../../',
@@ -74,7 +80,9 @@ async function run() {
       SAKAKI_BACKEND: E2E_BACKEND,
       SAKAKI_BROWSER: E2E_BROWSER,
       ...(E2E_BROWSER_PATH ? { SAKAKI_BROWSER_PATH: E2E_BROWSER_PATH } : {}),
+      ...(process.env.SAKAKI_E2E_VAULT_ONLY === '1' ? { SAKAKI_VAULT_ONLY: '1' } : {}),
       SAKAKI_PUBLIC_ALLOW_HTTP: '1',
+      SAKAKI_SUPPRESS_HTTP_WARN: '1',
       SAKAKI_SECURE_ALLOWED_DOMAINS: '127.0.0.1,localhost',
       SAKAKI_SECURE_ALLOW_HTTP: '1',
       SAKAKI_SECURE_ALLOW_PRIVATE: '1',
@@ -99,7 +107,7 @@ async function run() {
   const nav = await fetchJson(`http://127.0.0.1:${SAKAKI_PORT}/navigate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: `http://127.0.0.1:${TEST_PORT}/` })
+    body: JSON.stringify({ url: `http://127.0.0.1:${testPort}/` })
   });
   if (!nav.data || nav.data.success !== true) {
     console.error('[E2E] navigate response', nav);
@@ -124,7 +132,7 @@ async function run() {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${ADMIN_TOKEN}`
     },
-    body: JSON.stringify({ url: `http://127.0.0.1:${TEST_PORT}/challenge` })
+    body: JSON.stringify({ url: `http://127.0.0.1:${testPort}/challenge` })
   });
   if (!sec.data || sec.data.reason !== 'challenge_required') {
     console.error('[E2E] secure response', sec);

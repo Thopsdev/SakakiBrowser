@@ -20,6 +20,12 @@
   ],
   "author": "Thops",
   "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@napi-rs/blake-hash": "^1.3.6",
     "@noble/hashes": "^2.0.1",

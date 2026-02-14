@@ -9,6 +9,7 @@ const vault = require('./vault');
 const threatIntel = require('./threat-intel');
 
 const PUBLIC_ALLOW_HTTP = process.env.SAKAKI_PUBLIC_ALLOW_HTTP === '1';
+const SUPPRESS_HTTP_WARN = process.env.SAKAKI_SUPPRESS_HTTP_WARN === '1';
 
 // Operation log
 const auditLog = [];
@@ -56,7 +57,9 @@ async function beforeNavigate(url) {
       checks.risk = RISK_LEVELS.HIGH;
       checks.allowed = false;
     } else {
-      checks.warnings.push('Non-HTTPS connection');
+      if (!SUPPRESS_HTTP_WARN) {
+        checks.warnings.push('Non-HTTPS connection');
+      }
       checks.risk = RISK_LEVELS.MEDIUM;
     }
   }

@@ -1,45 +1,45 @@
 /**
  * Example: Client using ZKP to authenticate
  *
- * APIキーをネットワークに流さずに認証
+ * Authenticate without sending API keys over the network
  */
 
 const { ZKPClient } = require('../src/plugins/zkp-provider');
 
-// シミュレーション用
+// Simulation
 async function simulateAuth() {
   const API_KEY = 'demo-key-12345';
   const KEY_ID = 'user-123';
 
-  // クライアント初期化 (キーのハッシュのみ保持)
+  // Initialize client (stores only the key hash)
   const client = new ZKPClient(API_KEY);
 
   console.log('=== ZKP Authentication Flow ===\n');
 
-  // Step 1: サーバーにチャレンジを要求
+  // Step 1: request challenge from server
   console.log('1. Request challenge from server');
   console.log(`   POST /auth/challenge { keyId: "${KEY_ID}" }`);
 
-  // (実際はfetchで行う)
+  // (In practice, use fetch)
   // const { sessionId, challenge } = await fetch('/auth/challenge', {...})
 
-  // シミュレーション用のチャレンジ
+  // Simulated challenge
   const challenge = 'abc123...server-generated-random';
   const sessionId = 'session-xyz';
 
   console.log(`   Response: { sessionId: "${sessionId}", challenge: "${challenge.slice(0, 20)}..." }\n`);
 
-  // Step 2: チャレンジに応答
+  // Step 2: respond to challenge
   console.log('2. Compute response (locally, key never leaves client)');
   const response = client.respondToChallenge(challenge);
   console.log(`   response = hash(keyHash + challenge) = "${response.slice(0, 20)}..."\n`);
 
-  // Step 3: サーバーに応答を送信
+  // Step 3: send response to server
   console.log('3. Send response to server');
   console.log(`   POST /auth/verify { sessionId: "${sessionId}", response: "${response.slice(0, 20)}..." }`);
   console.log('   Response: { valid: true, keyId: "user-123" }\n');
 
-  // Step 4: 保護されたAPIにアクセス
+  // Step 4: access protected API
   console.log('4. Access protected API with ZKP auth header');
   console.log('   GET /api/protected');
   console.log('   Header: X-ZKP-Auth: { sessionId, response }');
@@ -52,11 +52,11 @@ async function simulateAuth() {
   console.log('- Even if traffic is intercepted, key is safe');
 }
 
-// 実際のHTTP呼び出し例
+// Real HTTP example
 async function realAuth(baseUrl, keyId, apiKey) {
   const client = new ZKPClient(apiKey);
 
-  // Step 1: チャレンジ取得
+  // Step 1: get challenge
   const challengeRes = await fetch(`${baseUrl}/auth/challenge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -66,7 +66,7 @@ async function realAuth(baseUrl, keyId, apiKey) {
 
   if (error) throw new Error(error);
 
-  // Step 2: 応答を計算して送信
+  // Step 2: compute response and send
   const response = client.respondToChallenge(challenge);
 
   const verifyRes = await fetch(`${baseUrl}/auth/verify`, {
@@ -78,7 +78,7 @@ async function realAuth(baseUrl, keyId, apiKey) {
   return verifyRes.json();
 }
 
-// 実行
+// Run
 simulateAuth();
 
 module.exports = { realAuth };

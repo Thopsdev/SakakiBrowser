@@ -2,7 +2,7 @@
 /**
  * Vault Security Test
  *
- * 全ての脆弱性が潰されているか検証
+ * Verify that known security issues are mitigated
  */
 
 const { spawn } = require('child_process');
@@ -18,7 +18,7 @@ let vaultProc = null;
 let passed = 0;
 let failed = 0;
 
-// テストユーティリティ
+// Test utilities
 function assert(condition, message) {
   if (condition) {
     console.log(`  ✓ ${message}`);
@@ -52,7 +52,7 @@ async function sendCommand(command, params = {}) {
 }
 
 async function startVault(keepData = false) {
-  // クリーンアップ
+  // Cleanup
   try { fs.unlinkSync(SOCKET_PATH); } catch {}
   if (!keepData) {
     try { fs.unlinkSync(VAULT_FILE); } catch {}
@@ -83,79 +83,79 @@ function stopVault() {
   try { fs.unlinkSync(SOCKET_PATH); } catch {}
 }
 
-// ========== テストケース ==========
+// ========== Test cases ==========
 
 async function test1_NoRetrieveMethod() {
-  console.log('\n[Test 1] retrieve() メソッドが存在しないこと');
+  console.log('\n[Test 1] retrieve() method is not available');
 
-  // retrieve コマンドを送信
+  // Send retrieve command
   const result = await sendCommand('retrieve', { name: 'test' });
 
-  assert(result.error === 'Unknown command', 'retrieve コマンドは存在しない');
+  assert(result.error === 'Unknown command', 'retrieve command is not available');
 }
 
 async function test2_MasterKeyRequired() {
-  console.log('\n[Test 2] マスターキーが必須');
+  console.log('\n[Test 2] master key is required');
 
-  // 短すぎるキー
+  // Key too short
   const result1 = await sendCommand('init', { masterKey: 'short' });
-  assert(!result1.success, '短いキーは拒否される');
-  assert(result1.error.includes('16 characters'), 'エラーメッセージが適切');
+  assert(!result1.success, 'short keys are rejected');
+  assert(result1.error.includes('16 characters'), 'error message is correct');
 
-  // キーなし
+  // Missing key
   const result2 = await sendCommand('init', {});
-  assert(!result2.success, 'キーなしは拒否される');
+  assert(!result2.success, 'missing key is rejected');
 }
 
 async function test3_StoreAndVerify() {
-  console.log('\n[Test 3] 保存と検証 (ZKP)');
+  console.log('\n[Test 3] store and verify (ZKP)');
 
-  // 初期化
+  // Initialize
   await sendCommand('init', { masterKey: 'test-master-key-16chars' });
 
-  // 保存
+  // Store
   const storeResult = await sendCommand('store', {
     name: 'api_key',
     value: 'sk-secret12345'
   });
-  assert(storeResult.success, 'シークレット保存成功');
-  assert(!storeResult.value, '保存結果に値が含まれていない');
+  assert(storeResult.success, 'secret stored successfully');
+  assert(!storeResult.value, 'stored result does not include value');
 
-  // 正しい値で検証
+  // Verify with correct value
   const verifyOk = await sendCommand('verify', {
     name: 'api_key',
     value: 'sk-secret12345'
   });
-  assert(verifyOk.valid === true, '正しい値で検証成功');
-  assert(!verifyOk.value, '検証結果に値が含まれていない');
+  assert(verifyOk.valid === true, 'verification succeeds with correct value');
+  assert(!verifyOk.value, 'verification result does not include value');
 
-  // 間違った値で検証
+  // Verify with incorrect value
   const verifyFail = await sendCommand('verify', {
     name: 'api_key',
     value: 'wrong-value'
   });
-  assert(verifyFail.valid === false, '間違った値は検証失敗');
+  assert(verifyFail.valid === false, 'verification fails with wrong value');
 }
 
 async function test4_ListOnlyNames() {
-  console.log('\n[Test 4] 一覧は名前のみ返す');
+  console.log('\n[Test 4] list returns names only');
 
   const listResult = await sendCommand('list');
-  assert(listResult.success, '一覧取得成功');
-  assert(Array.isArray(listResult.secrets), '配列が返される');
+  assert(listResult.success, 'list succeeds');
+  assert(Array.isArray(listResult.secrets), 'returns array');
 
   for (const secret of listResult.secrets) {
-    assert(secret.name !== undefined, '名前が含まれる');
-    assert(secret.value === undefined, '値が含まれていない');
-    assert(secret.encrypted === undefined, '暗号化データが含まれていない');
-    assert(secret.hash === undefined, 'ハッシュが含まれていない');
+    assert(secret.name !== undefined, 'name is present');
+    assert(secret.value === undefined, 'value is not present');
+    assert(secret.encrypted === undefined, 'encrypted data is not present');
+    assert(secret.hash === undefined, 'hash is not present');
   }
 }
 
 async function test5_BruteForceProtection() {
-  console.log('\n[Test 5] ブルートフォース対策');
+  console.log('\n[Test 5] brute-force protection');
 
-  // 10回連続で間違った値を送信
+  // Send 10 incorrect attempts
   for (let i = 0; i < 10; i++) {
     await sendCommand('verify', {
       name: 'api_key',
@@ -163,97 +163,97 @@ async function test5_BruteForceProtection() {
     });
   }
 
-  // 11回目はロックアウト
+  // 11th attempt should be locked out
   const lockedResult = await sendCommand('verify', {
     name: 'api_key',
     value: 'another-attempt'
   });
 
-  assert(!lockedResult.success, 'ロックアウトされる');
-  assert(lockedResult.error.includes('Too many'), 'レート制限エラー');
+  assert(!lockedResult.success, 'locked out');
+  assert(lockedResult.error.includes('Too many'), 'rate limit error');
 }
 
 async function test6_AuditLogging() {
-  console.log('\n[Test 6] 監査ログ');
+  console.log('\n[Test 6] audit log');
 
   const auditResult = await sendCommand('audit', { limit: 50 });
-  assert(auditResult.success, '監査ログ取得成功');
-  assert(Array.isArray(auditResult.log), 'ログ配列が返される');
-  assert(auditResult.log.length > 0, 'ログが記録されている');
+  assert(auditResult.success, 'audit log fetch succeeds');
+  assert(Array.isArray(auditResult.log), 'returns log array');
+  assert(auditResult.log.length > 0, 'log entries recorded');
 
-  // ログエントリの構造を確認
+  // Check log entry structure
   const entry = auditResult.log[0];
-  assert(entry.timestamp, 'タイムスタンプがある');
-  assert(entry.action, 'アクションがある');
-  assert(entry.success !== undefined, '成功/失敗フラグがある');
+  assert(entry.timestamp, 'timestamp exists');
+  assert(entry.action, 'action exists');
+  assert(entry.success !== undefined, 'success flag exists');
 }
 
 async function test7_Persistence() {
-  console.log('\n[Test 7] 永続化');
+  console.log('\n[Test 7] persistence');
 
-  // Vaultを再起動 (データは保持)
+  // Restart vault (keep data)
   stopVault();
   await startVault(true); // keepData = true
 
-  // 再初期化
+  // Re-init
   await sendCommand('init', { masterKey: 'test-master-key-16chars' });
 
-  // 以前のシークレットが残っているか
+  // Ensure previous secrets remain
   const listResult = await sendCommand('list');
-  assert(listResult.secrets.some(s => s.name === 'api_key'), '再起動後もシークレットが残る');
+  assert(listResult.secrets.some(s => s.name === 'api_key'), 'secrets remain after restart');
 
-  // 検証もできる
+  // Verification still works
   const verifyResult = await sendCommand('verify', {
     name: 'api_key',
     value: 'sk-secret12345'
   });
-  assert(verifyResult.valid === true, '再起動後も検証できる');
+  assert(verifyResult.valid === true, 'verification works after restart');
 }
 
 async function test8_ProcessIsolation() {
-  console.log('\n[Test 8] プロセス分離');
+  console.log('\n[Test 8] process isolation');
 
   const status = await sendCommand('status');
-  assert(status.pid !== process.pid, 'Vaultは別プロセスで動作');
-  assert(status.pid > 0, '有効なPID');
+  assert(status.pid !== process.pid, 'vault runs in a separate process');
+  assert(status.pid > 0, 'valid PID');
 }
 
 async function test9_DeleteSecret() {
-  console.log('\n[Test 9] シークレット削除');
+  console.log('\n[Test 9] secret deletion');
 
-  // 新しいシークレットを追加
+  // Add a new secret
   await sendCommand('store', { name: 'to_delete', value: 'temp' });
 
-  // 削除
+  // Delete
   const deleteResult = await sendCommand('delete', { name: 'to_delete' });
-  assert(deleteResult.success, '削除成功');
+  assert(deleteResult.success, 'deletion succeeds');
 
-  // 検証しようとすると失敗
+  // Verification should fail
   const verifyResult = await sendCommand('verify', { name: 'to_delete', value: 'temp' });
-  assert(!verifyResult.success || !verifyResult.valid, '削除後は検証できない');
+  assert(!verifyResult.success || !verifyResult.valid, 'verification fails after deletion');
 }
 
 async function test10_NoDefaultKey() {
-  console.log('\n[Test 10] デフォルトキーなし');
+  console.log('\n[Test 10] no default key');
 
-  // vault.jsのソースコードを検査
+  // Inspect vault.js source
   const vaultSource = fs.readFileSync(VAULT_PROCESS, 'utf8');
 
-  assert(!vaultSource.includes("'default'"), "ハードコードされた 'default' キーがない");
-  assert(!vaultSource.includes('"default"'), 'ハードコードされた "default" キーがない');
+  assert(!vaultSource.includes("'default'"), "no hardcoded 'default' key");
+  assert(!vaultSource.includes('"default"'), 'no hardcoded "default" key');
 }
 
 async function test11_RandomSaltPerSecret() {
-  console.log('\n[Test 11] シークレット毎にランダムsalt');
+  console.log('\n[Test 11] random salt per secret');
 
-  // vault.jsのソースコードを検査
+  // Inspect vault.js source
   const vaultSource = fs.readFileSync(VAULT_PROCESS, 'utf8');
 
-  assert(!vaultSource.includes("'salt'"), "ハードコードされた 'salt' がない");
-  assert(vaultSource.includes('randomBytes(32)'), 'ランダムsalt生成がある');
+  assert(!vaultSource.includes("'salt'"), "no hardcoded 'salt'");
+  assert(vaultSource.includes('randomBytes(32)'), 'random salt generation exists');
 }
 
-// ========== メイン ==========
+// ========== Main ==========
 
 async function main() {
   console.log('='.repeat(60));
@@ -286,7 +286,7 @@ async function main() {
   console.log(`Results: ${passed} passed, ${failed} failed`);
   console.log('='.repeat(60));
 
-  // クリーンアップ
+  // Cleanup
   try { fs.unlinkSync(VAULT_FILE); } catch {}
 
   process.exit(failed > 0 ? 1 : 0);

@@ -187,6 +187,27 @@ Always set `SAKAKI_ADMIN_TOKEN` when exposed, and keep Secure/Vault lanes protec
 - **Form fill:** `/type-secret` is disabled by default to prevent accidental secret exposure outside the Vault process.
 - **Proxy SSRF guard:** Private IPs and common metadata hosts are blocked unless explicitly allowed.
 
+## Operating Modes
+
+Set `SAKAKI_MODE` to control safety posture.
+
+- `default`: Warn on suspicious input, but do not force Vault-only behavior.
+- `strict`: Enforce Vault-only rules (blocks sensitive input outside Vault, requires proxy allowlist, defaults `enforceVaultProxy=true`).
+- `vault_only`: Alias of `strict` for compatibility (same as `SAKAKI_VAULT_ONLY=1`).
+
+## Strict Vault-Only Mode (Recommended for AI Agents)
+
+Set `SAKAKI_MODE=strict` (or `SAKAKI_MODE=vault_only`, `SAKAKI_VAULT_ONLY=1`) to enforce the following:
+
+- Sensitive input is **blocked** in public and secure lanes. Use `/vault/browser/execute` with `typeFromVault`.
+- Vault proxy requires an **allowlist** (`SAKAKI_PROXY_REQUIRE_ALLOWLIST=1` enforced).
+- External APIs can be forced to accept **Vault-signed requests only** (`enforceVaultProxy=true`).
+
+This mode is designed for “agent runs without secret exposure.”
+
+Provider template:
+- `examples/provider/express-vault-enforcement.js`
+
 ## Responsible Use
 
 Sakaki Browser is a defensive security tool for **user-authorized automation** and **secret protection**.
@@ -199,6 +220,15 @@ Operators are responsible for compliance with applicable laws and service polici
 - **Remote View is a human assist.** Anything typed by a human can still be leaked by that human.
 - **Allowlists and tokens are mandatory for safe operation.** Misconfiguration can negate protections.
 - **Some sites actively block automation.** Remote View exists for those cases, but success is never guaranteed.
+- **Constrained environments may block browser launch.** If Puppeteer/Playwright cannot start, use the fallback options below.
+
+### Browser Launch Fallbacks
+
+If the browser fails to launch in restricted environments (CI, MDM, containers):
+
+- Set `SAKAKI_BROWSER_PATH` to a real installed browser binary.
+- Switch backend: `SAKAKI_BACKEND=playwright` (often more tolerant).
+- API-only mode: `SAKAKI_SKIP_BROWSER_INIT=1` (Vault Proxy / signatures / allowlists still work).
 
 ## Security Checklist (Recommended)
 

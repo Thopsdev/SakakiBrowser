@@ -44,6 +44,12 @@ app.use(express.json({ limit: MAX_JSON_SIZE }));
 const BIND = process.env.SAKAKI_BIND || process.env.HOST || '127.0.0.1';
 const ADMIN_TOKEN = process.env.SAKAKI_ADMIN_TOKEN || '';
 const ALLOW_INSECURE_VAULT = process.env.SAKAKI_ALLOW_INSECURE_VAULT === '1';
+const MODE = String(process.env.SAKAKI_MODE || '').toLowerCase().trim();
+const VAULT_ONLY_MODE = process.env.SAKAKI_VAULT_ONLY === '1'
+  || MODE === 'strict'
+  || MODE === 'vault_only'
+  || MODE === 'vault-only'
+  || MODE === 'vaultonly';
 const SECURE_ALLOWED_DOMAINS = (process.env.SAKAKI_SECURE_ALLOWED_DOMAINS || '')
   .split(',')
   .map(s => s.trim().toLowerCase())
@@ -118,6 +124,11 @@ const PUPPETEER_EXTRA_ARGS = parseListValue(
   process.env.SAKAKI_PUPPETEER_ARGS || process.env.SAKAKI_CHROME_ARGS || ''
 );
 const PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
+const SKIP_BROWSER_INIT = process.env.SAKAKI_SKIP_BROWSER_INIT === '1';
+
+if (VAULT_ONLY_MODE) {
+  vaultEnforcement.setEnforceVaultProxy(true);
+}
 
 let BACKEND_CONFIG;
 try {
@@ -1330,6 +1341,24 @@ app.post('/type', async (req, res) => {
     return res.json({ error: 'selector and text required' });
   }
 
+  if (VAULT_ONLY_MODE) {
+    const warnings = detectSensitiveData(text);
+    if (warnings.length > 0) {
+      notifyApprovalRequired({
+        lane: 'default',
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        selector
+      });
+      return res.json({
+        blocked: true,
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        hint: 'Use /vault/browser/execute with typeFromVault'
+      });
+    }
+  }
+
   if (!currentPage) {
     return res.json({ error: 'No page open. Call /navigate first' });
   }
@@ -1384,6 +1413,21 @@ app.post('/submit-form', async (req, res) => {
 
   // Sensitive data check
   const vaultCheck = guardian.beforeFormSubmit(formData, url);
+  if (VAULT_ONLY_MODE && vaultCheck.warnings && vaultCheck.warnings.length > 0) {
+    notifyApprovalRequired({
+      lane: 'default',
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      url,
+      warnings: vaultCheck.warnings,
+      fields: Object.keys(formData || {})
+    });
+    return res.json({
+      blocked: true,
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      warnings: vaultCheck.warnings,
+      hint: 'Use /vault/browser/execute for secret-bearing forms'
+    });
+  }
   if (vaultCheck.requiresApproval) {
     notifyApprovalRequired({
       lane: 'default',
@@ -1658,6 +1702,24 @@ app.post('/secure/type', async (req, res) => {
     return res.json({ error: 'selector and text required' });
   }
 
+  if (VAULT_ONLY_MODE) {
+    const warnings = detectSensitiveData(text);
+    if (warnings.length > 0) {
+      notifyApprovalRequired({
+        lane: 'secure',
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        selector
+      });
+      return res.json({
+        blocked: true,
+        reason: 'Vault-only mode blocks sensitive input outside Vault',
+        warnings,
+        hint: 'Use /vault/browser/execute with typeFromVault'
+      });
+    }
+  }
+
   if (!SECURE_ALLOW_SENSITIVE) {
     const warnings = detectSensitiveData(text);
     if (warnings.length > 0) {
@@ -1723,6 +1785,21 @@ app.post('/secure/submit-form', async (req, res) => {
   }
 
   const vaultCheck = guardian.beforeFormSubmit(formData, url);
+  if (VAULT_ONLY_MODE && vaultCheck.warnings && vaultCheck.warnings.length > 0) {
+    notifyApprovalRequired({
+      lane: 'secure',
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      url,
+      warnings: vaultCheck.warnings,
+      fields: Object.keys(formData || {})
+    });
+    return res.json({
+      blocked: true,
+      reason: 'Vault-only mode blocks sensitive form submission outside Vault',
+      warnings: vaultCheck.warnings,
+      hint: 'Use /vault/browser/execute for secret-bearing forms'
+    });
+  }
   if (vaultCheck.requiresApproval && !SECURE_ALLOW_SENSITIVE) {
     notifyApprovalRequired({
       lane: 'secure',
@@ -2315,6 +2392,11 @@ app.get('/service/vault-enforcement', requireVaultAdmin, (req, res) => {
 app.post('/service/vault-enforcement', requireVaultAdmin, (req, res) => {
   const { enforceVaultProxy } = req.body;
   if (typeof enforceVaultProxy === 'boolean') {
+    if (VAULT_ONLY_MODE && enforceVaultProxy === false) {
+      return res.status(403).json({
+        error: 'Vault-only mode requires enforceVaultProxy=true'
+      });
+    }
     vaultEnforcement.setEnforceVaultProxy(enforceVaultProxy);
   }
   res.json(vaultEnforcement.getConfig());
@@ -3256,7 +3338,11 @@ async function main() {
     console.warn('[Sakaki-Browser] Secure lane disabled (SAKAKI_SECURE_ALLOWED_DOMAINS not set).');
   }
 
-  await initBrowser();
+  if (SKIP_BROWSER_INIT) {
+    console.warn('[Sakaki-Browser] Browser init skipped (SAKAKI_SKIP_BROWSER_INIT=1).');
+  } else {
+    await initBrowser();
+  }
 
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server, path: '/remote/ws' });
