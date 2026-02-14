@@ -37,3 +37,4 @@ The signature must be verified before any action is taken.
 Sakaki Browser Integration (HMAC)
 - Use HMAC-SHA256 over `canonical_json(envelope_without_sig_value)`
 - Default algorithm is `hmac-sha256` unless you provide a custom verifier
+- Signature value uses `hex:<hex>` format

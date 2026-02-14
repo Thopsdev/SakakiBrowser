@@ -37,7 +37,7 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-function canonicalizeEnvelope(envelope) {
+function canonicalizeEnvelopeFallback(envelope) {
   if (!envelope || typeof envelope !== 'object') return '';
   const clone = JSON.parse(JSON.stringify(envelope));
   if (clone.sig && typeof clone.sig === 'object') {
@@ -49,8 +49,8 @@ function canonicalizeEnvelope(envelope) {
   return stableStringify(clone);
 }
 
-function buildSignaturePayload(envelope) {
-  return canonicalizeEnvelope(envelope);
+function buildSignaturePayload(envelope, canonicalizeFn = canonicalizeEnvelopeFallback) {
+  return canonicalizeFn(envelope);
 }
 
 function decodeSigValue(raw) {
@@ -69,7 +69,7 @@ function decodeSigValue(raw) {
   return Buffer.from(trimmed, 'base64');
 }
 
-function createSignatureVerifier(sharedSecret, trustedKids = []) {
+function createSignatureVerifier(sharedSecret, trustedKids = [], canonicalizeFn = canonicalizeEnvelopeFallback) {
   return async (envelope) => {
     if (!sharedSecret) {
       return { ok: false, reason: 'SIG_SECRET_MISSING' };
@@ -86,7 +86,7 @@ function createSignatureVerifier(sharedSecret, trustedKids = []) {
         return { ok: false, reason: 'SIG_KID_NOT_ALLOWED' };
       }
     }
-    const payload = buildSignaturePayload(envelope);
+    const payload = buildSignaturePayload(envelope, canonicalizeFn);
     const expected = crypto.createHmac('sha256', sharedSecret).update(payload).digest();
     const provided = decodeSigValue(envelope.sig.value);
     if (!provided || provided.length !== expected.length) {
@@ -163,6 +163,9 @@ function createSafeA2ABridge(env, options = {}) {
 
   const sharedSecret = env.SAKAKI_A2A_SHARED_SECRET || '';
   const trustedKids = parseListValue(env.SAKAKI_A2A_TRUSTED_KIDS || '');
+  const canonicalizeEnvelope = typeof mod.canonicalizeEnvelope === 'function'
+    ? mod.canonicalizeEnvelope
+    : canonicalizeEnvelopeFallback;
   const safeA2A = mod.createSafeA2A({
     mode: env.SAKAKI_A2A_MODE || 'strict',
     max_ttl_sec: parseInt(env.SAKAKI_A2A_MAX_TTL_SEC || '600', 10),
@@ -174,7 +177,7 @@ function createSafeA2ABridge(env, options = {}) {
     dlp_mode: env.SAKAKI_A2A_DLP_MODE || 'deny',
     audit_mode: env.SAKAKI_A2A_AUDIT_MODE || 'metadata',
     receiver_aud: env.SAKAKI_A2A_RECEIVER_AUD || '',
-    verify_signature: createSignatureVerifier(sharedSecret, trustedKids)
+    verify_signature: createSignatureVerifier(sharedSecret, trustedKids, canonicalizeEnvelope)
   });
 
   const middleware = async (req, res, next) => {
@@ -195,6 +198,16 @@ function createSafeA2ABridge(env, options = {}) {
       });
     }
     const payload = req.body && (req.body.payload !== undefined ? req.body.payload : req.body);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload) && !Buffer.isBuffer(payload)) {
+      const merged = { ...payload };
+      delete merged.envelope;
+      delete merged.metadata;
+      delete merged.payload;
+      if (!req.body || typeof req.body !== 'object') {
+        req.body = {};
+      }
+      Object.assign(req.body, merged);
+    }
     const result = await safeA2A.inbound({ envelope, payload, metadata: req.body && req.body.metadata });
     if (!result.allowed) {
       if (typeof onBlock === 'function') {
@@ -206,6 +219,7 @@ function createSafeA2ABridge(env, options = {}) {
       });
     }
     req.a2aEnvelope = envelope;
+    req.a2aPayload = payload;
     return next();
   };
 

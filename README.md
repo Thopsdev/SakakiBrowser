@@ -185,6 +185,7 @@ npm start
 ```
 node plugins/safe-a2a/examples/send-navigate.js
 ```
+Note: If `payload` is present, Sakaki treats it as the source of truth and merges it into the request body before routing.
 
 Production A2A template: `docs/production-a2a.md`.
 

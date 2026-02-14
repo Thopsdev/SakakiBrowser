@@ -1,5 +1,6 @@
 const { outboundGuard } = require('./middleware/outbound');
 const { inboundGuard } = require('./middleware/inbound');
+const { canonicalizeEnvelope, computePayloadHash, verifyPayloadHash } = require('./middleware/crypto');
 
 const defaultConfig = {
   mode: 'strict',
@@ -24,5 +25,8 @@ function createSafeA2A(config = {}) {
 
 module.exports = {
   createSafeA2A,
-  defaultConfig
+  defaultConfig,
+  canonicalizeEnvelope,
+  computePayloadHash,
+  verifyPayloadHash
 };

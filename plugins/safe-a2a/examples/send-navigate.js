@@ -8,7 +8,8 @@ const HASH_ALG = (process.env.SAKAKI_A2A_HASH_ALG || 'sha256').toLowerCase();
 
 function signEnvelope(env) {
   const payload = canonicalizeEnvelope(env);
-  return crypto.createHmac('sha256', SHARED_SECRET).update(payload).digest('hex');
+  const hex = crypto.createHmac('sha256', SHARED_SECRET).update(payload).digest('hex');
+  return `hex:${hex}`;
 }
 
 async function main() {
