@@ -124,9 +124,11 @@ npm start
 
 - Binds to `127.0.0.1` by default (`SAKAKI_BIND=0.0.0.0` to expose).
 - Vault endpoints require an admin token for non-local access (`SAKAKI_ADMIN_TOKEN`).
+- Operational endpoints (`/scan/*`, `/secrets/*`, `/audit-log`, `/security-stats`) require admin on non-local access.
 - Vault socket defaults to `~/.sakaki/vault.sock` (`VAULT_SOCKET` to override).
 - `/zkp/*` endpoints are admin-protected.
 - `/type-secret` is disabled (410) to prevent secrets entering the main process.
+- Browser sandbox is enabled by default. Legacy override: `SAKAKI_ALLOW_NO_SANDBOX=1` (not recommended).
 - Public lane blocks HTTP by default. Override: `SAKAKI_PUBLIC_ALLOW_HTTP=1`.
 - Vault proxy blocks private/metadata targets and allows **HTTPS only** by default.
   - Override: `SAKAKI_PROXY_ALLOW_HTTP=1`, `SAKAKI_PROXY_ALLOW_PRIVATE=1`

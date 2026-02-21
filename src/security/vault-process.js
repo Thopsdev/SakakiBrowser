@@ -80,6 +80,7 @@ const VAULT_PUPPETEER_EXTRA_ARGS = (() => {
   const sep = raw.includes(';') ? ';' : ',';
   return raw.split(sep).map(s => s.trim()).filter(Boolean);
 })();
+const ALLOW_NO_SANDBOX = process.env.SAKAKI_ALLOW_NO_SANDBOX === '1';
 const VAULT_PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_VAULT_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
 const VAULT_BROWSER_ALLOW_SUBDOMAINS =
   process.env.SAKAKI_VAULT_BROWSER_ALLOW_SUBDOMAINS === '1' ||
@@ -552,18 +553,18 @@ async function getVaultBrowser() {
   if (vaultBrowser) return vaultBrowser;
   if (!vaultBrowserLaunching) {
     const baseArgs = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
       '--disable-crashpad',
       '--disable-gpu',
       '--disable-dev-shm-usage',
       ...VAULT_PUPPETEER_EXTRA_ARGS
     ];
-    const fallbackArgs = [
-      ...baseArgs,
-      '--no-zygote',
-      '--single-process'
-    ];
+    if (ALLOW_NO_SANDBOX) {
+      baseArgs.unshift('--disable-setuid-sandbox');
+      baseArgs.unshift('--no-sandbox');
+    }
+    const fallbackArgs = ALLOW_NO_SANDBOX
+      ? [...baseArgs, '--no-zygote', '--single-process']
+      : [...baseArgs];
     const launch = (args) => launchBrowser(VAULT_BACKEND_CONFIG, {
       headless: VAULT_HEADLESS_MODE,
       args
@@ -572,7 +573,10 @@ async function getVaultBrowser() {
     if (VAULT_PUPPETEER_FORCE_SINGLE_PROCESS) {
       vaultBrowserLaunching = launch(fallbackArgs);
     } else {
-      vaultBrowserLaunching = launch(baseArgs).catch(() => launch(fallbackArgs));
+      vaultBrowserLaunching = launch(baseArgs).catch((err) => {
+        if (!ALLOW_NO_SANDBOX) throw err;
+        return launch(fallbackArgs);
+      });
     }
   }
   vaultBrowser = await vaultBrowserLaunching;
@@ -1632,6 +1636,9 @@ if (require.main === module) {
   console.log('  - Rate limiting + self-destruct');
   console.log('  - Full audit logging');
   console.log('  - Encrypted persistence');
+  if (ALLOW_NO_SANDBOX) {
+    console.warn('[Vault] SAKAKI_ALLOW_NO_SANDBOX=1 enabled. Browser sandbox is disabled.');
+  }
 
   startServer();
 }

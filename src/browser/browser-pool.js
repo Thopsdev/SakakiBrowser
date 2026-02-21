@@ -6,6 +6,7 @@
  */
 
 const { resolveBackendConfig, launchBrowser } = require('./backend');
+const ALLOW_NO_SANDBOX = process.env.SAKAKI_ALLOW_NO_SANDBOX === '1';
 
 class BrowserPool {
   constructor(options = {}) {
@@ -19,25 +20,28 @@ class BrowserPool {
     this.initialized = false;
 
     // Performance settings
+    const launchArgs = [
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--no-first-run',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-translate',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--safebrowsing-disable-auto-update',
+    ];
+    if (ALLOW_NO_SANDBOX) {
+      launchArgs.unshift('--disable-setuid-sandbox');
+      launchArgs.unshift('--no-sandbox');
+      launchArgs.push('--no-zygote', '--single-process');
+    }
     this.launchOptions = {
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--disable-translate',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-default-browser-check',
-        '--safebrowsing-disable-auto-update',
-      ],
+      args: launchArgs,
       executablePath: this.backendConfig.executablePath || undefined,
       ...options.launchOptions
     };

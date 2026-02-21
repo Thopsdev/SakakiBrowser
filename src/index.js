@@ -125,6 +125,7 @@ const HEADLESS_MODE = parseHeadlessMode(
 const PUPPETEER_EXTRA_ARGS = parseListValue(
   process.env.SAKAKI_PUPPETEER_ARGS || process.env.SAKAKI_CHROME_ARGS || ''
 );
+const ALLOW_NO_SANDBOX = process.env.SAKAKI_ALLOW_NO_SANDBOX === '1';
 const PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
 const SKIP_BROWSER_INIT = process.env.SAKAKI_SKIP_BROWSER_INIT === '1';
 
@@ -532,18 +533,31 @@ app.use('/zkp', requireVaultAdmin);
 
 // Protect secure lane endpoints
 app.use('/secure', requireVaultAdmin);
+// Protect operational and diagnostics endpoints
+app.use('/scan', requireVaultAdmin);
+app.use('/detect-sensitive', requireVaultAdmin);
+app.use('/audit-log', requireVaultAdmin);
+app.use('/security-stats', requireVaultAdmin);
+app.use('/a2a/stats', requireVaultAdmin);
+app.use('/threat-check', requireVaultAdmin);
+app.use('/resource-alerts', requireVaultAdmin);
+app.use('/secrets', requireVaultAdmin);
 
 // Browser initialization
 async function initBrowser() {
   const baseArgs = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
     '--disable-crashpad',
     '--disable-gpu',
     '--disable-dev-shm-usage',
     ...PUPPETEER_EXTRA_ARGS
   ];
-  const fallbackArgs = [...baseArgs, '--no-zygote', '--single-process'];
+  if (ALLOW_NO_SANDBOX) {
+    baseArgs.unshift('--disable-setuid-sandbox');
+    baseArgs.unshift('--no-sandbox');
+  }
+  const fallbackArgs = ALLOW_NO_SANDBOX
+    ? [...baseArgs, '--no-zygote', '--single-process']
+    : [...baseArgs];
   const launch = (args) => launchBrowser(BACKEND_CONFIG, {
     headless: HEADLESS_MODE,
     args
@@ -551,7 +565,10 @@ async function initBrowser() {
   if (PUPPETEER_FORCE_SINGLE_PROCESS) {
     browser = await launch(fallbackArgs);
   } else {
-    browser = await launch(baseArgs).catch(() => launch(fallbackArgs));
+    browser = await launch(baseArgs).catch((err) => {
+      if (!ALLOW_NO_SANDBOX) throw err;
+      return launch(fallbackArgs);
+    });
   }
   const label = `${BACKEND_CONFIG.backend}/${BACKEND_CONFIG.browserType}`;
   const extra = BACKEND_CONFIG.executablePath ? ` (${BACKEND_CONFIG.executablePath})` : '';
@@ -2888,12 +2905,18 @@ app.post('/secrets/enabled', (req, res) => {
 
 // Health check
 app.get('/health', (req, res) => {
+  const avStats = antivirus.getStats();
+  const providers = Array.isArray(avStats.providers) ? avStats.providers : [];
+  const clamav = providers.find((p) => p.name === 'ClamAV');
+  const virustotal = providers.find((p) => p.name === 'VirusTotal');
   res.json({
     status: 'ok',
     browser: !!browser,
     security: {
-      clamav: antivirus.SCANNERS.clamav.available,
-      virustotal: !!antivirus.SCANNERS.virustotal.apiKey,
+      clamav: !!clamav?.enabled,
+      virustotal: !!virustotal?.enabled,
+      avInitialized: !!avStats.initialized,
+      avEnabledProviders: providers.filter((p) => p.enabled).map((p) => p.name),
       resourceMonitoring: resourceMonitor.getStats().isMonitoring,
       rateLimiter: 'active'
     }
@@ -3566,6 +3589,9 @@ async function main() {
   }
   if (!SECURE_ALLOWED_DOMAINS.length) {
     console.warn('[Sakaki-Browser] Secure lane disabled (SAKAKI_SECURE_ALLOWED_DOMAINS not set).');
+  }
+  if (ALLOW_NO_SANDBOX) {
+    console.warn('[Sakaki-Browser] SAKAKI_ALLOW_NO_SANDBOX=1 enabled. Use only in constrained legacy environments.');
   }
 
   if (SKIP_BROWSER_INIT) {
