@@ -11,7 +11,8 @@
     "dev": "node --watch src/index.js",
     "test:e2e": "node test/e2e/smoke.js",
     "test:strict": "node test/strict-mode-test.js",
-    "test:safe-a2a": "node plugins/safe-a2a/examples/run-vectors.js"
+    "test:safe-a2a": "node plugins/safe-a2a/examples/run-vectors.js",
+    "test:secret-isolation": "node test/secret-isolation-test.js"
   },
   "keywords": [
     "browser-automation",

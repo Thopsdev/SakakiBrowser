@@ -76,6 +76,12 @@ class SecretDetector {
 
     // Vault reference for auto-storing
     this.vaultClient = options.vaultClient || null;
+    this.isolatedStoreClient = options.isolatedStoreClient || null;
+    this.isolation = {
+      enabled: options.isolationEnabled === true,
+      enforce: options.isolationEnforce === true,
+      allowVaultFallback: options.allowVaultFallback === true
+    };
 
     // Detection log
     this.detectionLog = [];
@@ -104,6 +110,48 @@ class SecretDetector {
   removePattern(name) {
     this.customPatterns = this.customPatterns.filter(p => p.name !== name);
     return this;
+  }
+
+  /**
+   * Set local vault client fallback
+   */
+  setVaultClient(client) {
+    this.vaultClient = client || null;
+    return this;
+  }
+
+  /**
+   * Set physically isolated store client
+   */
+  setIsolatedStoreClient(client) {
+    this.isolatedStoreClient = client || null;
+    return this;
+  }
+
+  /**
+   * Configure isolation policy
+   */
+  configureIsolation(config = {}) {
+    if (Object.prototype.hasOwnProperty.call(config, 'enabled')) {
+      this.isolation.enabled = config.enabled === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'enforce')) {
+      this.isolation.enforce = config.enforce === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'allowVaultFallback')) {
+      this.isolation.allowVaultFallback = config.allowVaultFallback === true;
+    }
+    return this.getIsolationConfig();
+  }
+
+  getIsolationConfig() {
+    return {
+      enabled: this.isolation.enabled,
+      enforce: this.isolation.enforce,
+      allowVaultFallback: this.isolation.allowVaultFallback,
+      isolatedStoreConfigured: !!this.isolatedStoreClient?.isConfigured?.(),
+      vaultFallbackConfigured: !!this.vaultClient
+    };
   }
 
   /**
@@ -306,6 +354,92 @@ class SecretDetector {
   }
 
   /**
+   * Auto-store secrets into physically isolated storage
+   */
+  async autoIsolate(findings, originalData, context = {}) {
+    if (!this.isolatedStoreClient || findings.length === 0) {
+      return { stored: 0, refs: {}, failed: 0 };
+    }
+
+    const refs = {};
+    let stored = 0;
+    let failed = 0;
+
+    for (const finding of findings) {
+      try {
+        let value;
+        if (finding.path) {
+          value = this._getValueByPath(originalData, finding.path);
+        } else if (finding.value) {
+          value = finding.value;
+        }
+
+        if (!value) continue;
+
+        const secretName = `isolated-${finding.type.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+        const result = await this.isolatedStoreClient.store({
+          name: secretName,
+          value: String(value),
+          metadata: {
+            source: context.source || 'unknown',
+            method: context.method || null,
+            path: context.path || null,
+            findingType: finding.type,
+            severity: finding.severity,
+            findingPath: finding.path || null
+          }
+        });
+
+        if (!result.success) {
+          failed++;
+          this._logDetection('auto-isolate-failed', finding, result.error || 'unknown');
+          continue;
+        }
+
+        refs[finding.path || finding.type] = result.ref || secretName;
+        stored++;
+        this.stats.protected++;
+        this._logDetection('auto-isolate', finding, result.ref || secretName);
+      } catch (e) {
+        failed++;
+        this._logDetection('auto-isolate-failed', finding, e.message);
+      }
+    }
+
+    return { stored, refs, failed };
+  }
+
+  /**
+   * Auto-store using isolation policy (isolated store first)
+   */
+  async autoStore(findings, originalData, context = {}) {
+    const hasFindings = Array.isArray(findings) && findings.length > 0;
+    if (!hasFindings) return { mode: 'none', stored: 0, refs: {} };
+
+    if (this.isolation.enabled) {
+      if (!this.isolatedStoreClient || !this.isolatedStoreClient.isConfigured()) {
+        if (this.isolation.allowVaultFallback && this.vaultClient) {
+          const fallback = await this.autoVault(findings, originalData);
+          return { mode: 'vault-fallback', ...fallback, failed: 0 };
+        }
+        if (this.isolation.enforce) {
+          throw new Error('Isolated secret store is not configured');
+        }
+        return { mode: 'isolation-missing', stored: 0, refs: {}, failed: findings.length };
+      }
+
+      const isolated = await this.autoIsolate(findings, originalData, context);
+      if (this.isolation.enforce && isolated.failed > 0) {
+        throw new Error(`Isolated secret store failed for ${isolated.failed} finding(s)`);
+      }
+      return { mode: 'isolated', ...isolated };
+    }
+
+    const vault = await this.autoVault(findings, originalData);
+    return { mode: 'vault', ...vault, failed: 0 };
+  }
+
+  /**
    * Get value by path from object
    */
   _getValueByPath(obj, path) {
@@ -359,7 +493,8 @@ class SecretDetector {
       enabled: this.enabled,
       builtinPatterns: this.patterns.map(p => ({ name: p.name, severity: p.severity })),
       customPatterns: this.customPatterns.map(p => ({ name: p.name, severity: p.severity })),
-      sensitiveFields: this.sensitiveFields
+      sensitiveFields: this.sensitiveFields,
+      isolation: this.getIsolationConfig()
     };
   }
 

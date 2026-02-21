@@ -129,6 +129,13 @@ npm start
 - `/zkp/*` endpoints are admin-protected.
 - `/type-secret` is disabled (410) to prevent secrets entering the main process.
 - Browser sandbox is enabled by default. Legacy override: `SAKAKI_ALLOW_NO_SANDBOX=1` (not recommended).
+- Physical isolation store (optional, recommended for VPS agent runs):
+  - `SAKAKI_ISOLATED_STORE_ENABLED=1`
+  - `SAKAKI_ISOLATED_STORE_URL=https://isolated-vault.local/v1/secrets/store`
+  - `SAKAKI_ISOLATED_STORE_ENFORCE=1` (fail-close when store unavailable)
+  - `SAKAKI_ISOLATED_STORE_AUTO_CAPTURE=1` (scan inbound JSON requests)
+  - `SAKAKI_ISOLATED_STORE_BLOCK_RAW=1` (block raw payload after isolation)
+  - Optional fallback: `SAKAKI_ISOLATED_STORE_FALLBACK_VAULT=1` (not recommended)
 - Public lane blocks HTTP by default. Override: `SAKAKI_PUBLIC_ALLOW_HTTP=1`.
 - Vault proxy blocks private/metadata targets and allows **HTTPS only** by default.
   - Override: `SAKAKI_PROXY_ALLOW_HTTP=1`, `SAKAKI_PROXY_ALLOW_PRIVATE=1`
@@ -243,6 +250,20 @@ Set `SAKAKI_MODE=strict` (or `SAKAKI_MODE=vault_only`, `SAKAKI_VAULT_ONLY=1`) to
 - Unsafe toggles are **forced OFF** (HTTP/private/sensitive allow flags are ignored).
 
 This mode is designed for “agent runs without secret exposure.”
+
+## Physical Isolation Mode (Recommended for Split Architecture)
+
+When agents run on VPS but secrets must stay on a physically separate machine:
+
+1. Enable isolated store in SakakiBrowser (`SAKAKI_ISOLATED_STORE_ENABLED=1`).
+2. Point `SAKAKI_ISOLATED_STORE_URL` to your isolated signer/vault service.
+3. Set `SAKAKI_ISOLATED_STORE_ENFORCE=1` + `SAKAKI_ISOLATED_STORE_BLOCK_RAW=1`.
+4. Keep `SAKAKI_ISOLATED_STORE_FALLBACK_VAULT=0` to avoid local fallback.
+
+Behavior:
+- If sensitive data is detected, SakakiBrowser stores it to the isolated endpoint.
+- Raw request is blocked with `409 SENSITIVE_ISOLATED` (or `503 ISOLATION_UNAVAILABLE` when fail-close triggers).
+- No automatic downgrade to local Vault unless explicitly enabled.
 
 Provider template:
 - `examples/provider/express-vault-enforcement.js`
@@ -707,6 +728,8 @@ await fastBrowser.click('login_button');
 |----------|--------|-------------|
 | `/detect-sensitive` | POST | Detect sensitive data |
 | `/scan/file` | POST | Antivirus scan |
+| `/secrets/isolation/config` | GET/POST | View/update isolation store policy |
+| `/secrets/isolation/test` | POST | Test detect + isolated save workflow |
 | `/audit-log` | GET | Get operation log |
 | `/a2a/stats` | GET | A2A guard metrics |
 | `/health` | GET | Health check |

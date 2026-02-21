@@ -32,6 +32,7 @@ const { webhookReceiver } = require('./realtime/webhook-receiver');
 const { notificationCenter } = require('./realtime/notification-center');
 const fastHash = require('./security/fast-hash');
 const { secretDetector } = require('./security/secret-detector');
+const { IsolatedStoreClient } = require('./security/isolated-store-client');
 const { semanticFinder } = require('./browser/semantic-finder');
 const { createSafeA2ABridge } = require('./plugins/safe-a2a-bridge');
 
@@ -128,6 +129,30 @@ const PUPPETEER_EXTRA_ARGS = parseListValue(
 const ALLOW_NO_SANDBOX = process.env.SAKAKI_ALLOW_NO_SANDBOX === '1';
 const PUPPETEER_FORCE_SINGLE_PROCESS = process.env.SAKAKI_PUPPETEER_FORCE_SINGLE_PROCESS === '1';
 const SKIP_BROWSER_INIT = process.env.SAKAKI_SKIP_BROWSER_INIT === '1';
+const ISOLATED_STORE_URL = process.env.SAKAKI_ISOLATED_STORE_URL || '';
+const ISOLATED_STORE_API_KEY = process.env.SAKAKI_ISOLATED_STORE_API_KEY || '';
+const ISOLATED_STORE_HMAC_SECRET = process.env.SAKAKI_ISOLATED_STORE_HMAC_SECRET || '';
+const ISOLATED_STORE_REQUIRE_HTTPS = process.env.SAKAKI_ISOLATED_STORE_REQUIRE_HTTPS !== '0';
+const ISOLATED_STORE_TIMEOUT_MS = parseInt(
+  process.env.SAKAKI_ISOLATED_STORE_TIMEOUT_MS || '8000',
+  10
+);
+const ISOLATED_STORE_ENABLED = process.env.SAKAKI_ISOLATED_STORE_ENABLED === '1';
+const ISOLATED_STORE_ENFORCE = process.env.SAKAKI_ISOLATED_STORE_ENFORCE === '1';
+const ISOLATED_STORE_FALLBACK_VAULT = process.env.SAKAKI_ISOLATED_STORE_FALLBACK_VAULT === '1';
+const ISOLATED_STORE_AUTO_CAPTURE = process.env.SAKAKI_ISOLATED_STORE_AUTO_CAPTURE === '1';
+const ISOLATED_STORE_BLOCK_RAW = process.env.SAKAKI_ISOLATED_STORE_BLOCK_RAW !== '0';
+const ISOLATED_STORE_EXCLUDE_PATHS = parseListValue(
+  process.env.SAKAKI_ISOLATED_STORE_EXCLUDE_PATHS
+    || '/health,/security-stats,/audit-log,/scan,/detect-sensitive,/secrets/test,/secrets/isolation/test'
+);
+const isolatedStoreClient = new IsolatedStoreClient({
+  endpoint: ISOLATED_STORE_URL,
+  apiKey: ISOLATED_STORE_API_KEY,
+  hmacSecret: ISOLATED_STORE_HMAC_SECRET,
+  requireHttps: ISOLATED_STORE_REQUIRE_HTTPS,
+  timeoutMs: ISOLATED_STORE_TIMEOUT_MS
+});
 
 if (VAULT_ONLY_MODE) {
   vaultEnforcement.setEnforceVaultProxy(true);
@@ -149,6 +174,15 @@ const safeA2ABridge = createSafeA2ABridge(process.env, { onBlock: recordA2ABlock
 if (safeA2ABridge.enabled) {
   app.use(safeA2ABridge.middleware);
 }
+secretDetector
+  .setVaultClient(vaultClient)
+  .setIsolatedStoreClient(isolatedStoreClient)
+  .configureIsolation({
+    enabled: ISOLATED_STORE_ENABLED,
+    enforce: ISOLATED_STORE_ENFORCE,
+    allowVaultFallback: ISOLATED_STORE_FALLBACK_VAULT
+  });
+
 function isLocalRequest(req) {
   const addr = req.socket?.remoteAddress || '';
   return (
@@ -166,6 +200,14 @@ function parseListValue(raw) {
   if (!raw) return [];
   const sep = raw.includes(';') ? ';' : ',';
   return raw.split(sep).map(s => s.trim()).filter(Boolean);
+}
+
+function pathPrefixMatches(pathname, prefixes) {
+  if (!pathname || !Array.isArray(prefixes) || prefixes.length === 0) return false;
+  return prefixes.some((prefix) => {
+    if (!prefix) return false;
+    return pathname === prefix || pathname.startsWith(prefix + '/');
+  });
 }
 
 function parseHeadlessMode(raw) {
@@ -542,6 +584,70 @@ app.use('/a2a/stats', requireVaultAdmin);
 app.use('/threat-check', requireVaultAdmin);
 app.use('/resource-alerts', requireVaultAdmin);
 app.use('/secrets', requireVaultAdmin);
+
+async function maybeCaptureSensitiveRequest(req, res, next) {
+  if (!ISOLATED_STORE_AUTO_CAPTURE) return next();
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  if (!req.body || typeof req.body !== 'object') return next();
+  if (pathPrefixMatches(req.path, ISOLATED_STORE_EXCLUDE_PATHS)) return next();
+
+  const scan = secretDetector.scanObject(req.body);
+  if (scan.clean || !scan.findings.length) return next();
+
+  const compactFindings = scan.findings.map((f) => ({
+    path: f.path,
+    type: f.type,
+    severity: f.severity,
+    fieldName: f.fieldName
+  }));
+
+  try {
+    const isolation = await secretDetector.autoStore(scan.findings, req.body, {
+      source: 'request',
+      method: req.method,
+      path: req.path
+    });
+
+    req.sensitiveIsolation = {
+      ...isolation,
+      findings: compactFindings
+    };
+
+    guardian.logAction('sensitive-isolated', {
+      path: req.path,
+      method: req.method,
+      findings: compactFindings.length,
+      mode: isolation.mode,
+      stored: isolation.stored || 0,
+      failed: isolation.failed || 0
+    });
+
+    if (ISOLATED_STORE_BLOCK_RAW) {
+      return res.status(409).json({
+        error: 'Sensitive data detected and isolated. Raw payload was blocked.',
+        code: 'SENSITIVE_ISOLATED',
+        findings: compactFindings,
+        refs: isolation.refs || {}
+      });
+    }
+
+    req.body = scan.protected;
+    return next();
+  } catch (error) {
+    guardian.logAction('sensitive-isolation-failed', {
+      path: req.path,
+      method: req.method,
+      findings: compactFindings.length,
+      error: error.message
+    });
+    return res.status(503).json({
+      error: 'Sensitive isolation service unavailable. Request blocked (fail-close).',
+      code: 'ISOLATION_UNAVAILABLE'
+    });
+  }
+}
+
+app.use(maybeCaptureSensitiveRequest);
 
 // Browser initialization
 async function initBrowser() {
@@ -2838,6 +2944,94 @@ app.get('/resource-alerts', (req, res) => {
 
 // ========== Secret Detector ==========
 
+app.get('/secrets/isolation/config', (req, res) => {
+  res.json({
+    detector: secretDetector.getIsolationConfig(),
+    client: isolatedStoreClient.getConfig(),
+    autoCapture: ISOLATED_STORE_AUTO_CAPTURE,
+    blockRaw: ISOLATED_STORE_BLOCK_RAW,
+    excludePaths: ISOLATED_STORE_EXCLUDE_PATHS
+  });
+});
+
+app.post('/secrets/isolation/config', (req, res) => {
+  const {
+    enabled,
+    enforce,
+    allowVaultFallback,
+    endpoint,
+    requireHttps,
+    timeoutMs
+  } = req.body || {};
+
+  if (
+    enabled === undefined
+    && enforce === undefined
+    && allowVaultFallback === undefined
+    && endpoint === undefined
+    && requireHttps === undefined
+    && timeoutMs === undefined
+  ) {
+    return res.status(400).json({
+      error: 'No changes requested. Provide at least one of: enabled,enforce,allowVaultFallback,endpoint,requireHttps,timeoutMs'
+    });
+  }
+
+  if (endpoint !== undefined || requireHttps !== undefined || timeoutMs !== undefined) {
+    isolatedStoreClient.setConfig({ endpoint, requireHttps, timeoutMs });
+  }
+  secretDetector.configureIsolation({ enabled, enforce, allowVaultFallback });
+
+  return res.json({
+    success: true,
+    detector: secretDetector.getIsolationConfig(),
+    client: isolatedStoreClient.getConfig()
+  });
+});
+
+app.post('/secrets/isolation/test', async (req, res) => {
+  const { data, source = 'manual-test' } = req.body || {};
+  if (!data) return res.status(400).json({ error: 'data required' });
+
+  const scan = typeof data === 'string'
+    ? secretDetector.scanString(data)
+    : secretDetector.scanObject(data);
+  const findings = scan.findings || [];
+  if (!findings.length) {
+    return res.json({
+      success: true,
+      clean: true,
+      findings: [],
+      stored: 0
+    });
+  }
+
+  try {
+    const isolation = await secretDetector.autoStore(findings, data, {
+      source,
+      method: req.method,
+      path: req.path
+    });
+    return res.json({
+      success: true,
+      clean: false,
+      findings: findings.map((f) => ({
+        path: f.path,
+        type: f.type,
+        severity: f.severity,
+        fieldName: f.fieldName
+      })),
+      isolation
+    });
+  } catch (error) {
+    return res.status(503).json({
+      success: false,
+      error: error.message,
+      code: 'ISOLATION_UNAVAILABLE'
+    });
+  }
+});
+
 // Get secret detector config
 app.get('/secrets/config', (req, res) => {
   res.json(secretDetector.getConfig());
@@ -3592,6 +3786,16 @@ async function main() {
   }
   if (ALLOW_NO_SANDBOX) {
     console.warn('[Sakaki-Browser] SAKAKI_ALLOW_NO_SANDBOX=1 enabled. Use only in constrained legacy environments.');
+  }
+  if (ISOLATED_STORE_ENABLED) {
+    const iso = isolatedStoreClient.getConfig();
+    console.log(`[Sakaki-Browser] Isolated secret store enabled (${iso.endpoint || 'endpoint-missing'})`);
+    if (!iso.configured && ISOLATED_STORE_ENFORCE) {
+      console.warn('[Sakaki-Browser] Isolated store enforce mode is ON but endpoint is not configured (fail-close on detections).');
+    }
+    if (!ISOLATED_STORE_AUTO_CAPTURE) {
+      console.warn('[Sakaki-Browser] Isolated store enabled without auto-capture. Use /secrets/isolation/test or explicit workflows.');
+    }
   }
 
   if (SKIP_BROWSER_INIT) {
