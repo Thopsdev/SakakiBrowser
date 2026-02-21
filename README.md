@@ -107,6 +107,11 @@ Requirements:
 - Node.js 18+
 - Chromium/Chrome (recommended for Puppeteer)
 
+Runtime OS recommendation:
+- Production recommendation: Linux (`Debian 12` / `Ubuntu 22.04+`)
+- macOS: temporary/local testing only
+- Windows: not recommended for this operational model
+
 ```bash
 git clone https://github.com/Thopsdev/SakakiBrowser.git
 cd SakakiBrowser
